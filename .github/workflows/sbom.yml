@@ -27,7 +27,7 @@ jobs:
         run: cargo install cargo-sbom
 
       - name: Generate SBOM
-        run: cargo sbom --output-format cyclonedx_json_1_4 > sbom.json
+        run: cargo sbom --output-format cyclone_dx_json_1_4 > sbom.json
 
       - name: Check license compliance
         run: |

@@ -82,9 +82,9 @@ jobs:
           source <(cargo llvm-cov show-env --export-prefix)
           cargo nextest run --workspace --no-run --cargo-profile profiling
           mkdir -p hardware-test-binaries
-          find target/llvm-cov-target/profiling/deps/ -maxdepth 1 -type f -executable \
+          find target/profiling/deps/ -maxdepth 1 -type f -executable \
             ! -name "*.d" ! -name "*.rlib" ! -name "*.rmeta" ! -name "*.so" \
-            -exec cp {} hardware-test-binaries/ \; 2>/dev/null || true
+            -exec cp {} hardware-test-binaries/ \;
           echo "Test binaries:"
           ls -la hardware-test-binaries/
 
@@ -101,7 +101,7 @@ jobs:
         with:
           name: coverage-binaries-aarch64
           path: |
-            target/llvm-cov-target/profiling/deps/*
+            target/profiling/deps/*
           retention-days: 7
 
   # ===========================================================================
@@ -201,7 +201,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: coverage-binaries-aarch64
-          path: target/llvm-cov-target/profiling/deps/
+          path: target/profiling/deps/
 
       - name: Download profraw from hardware test
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -231,7 +231,7 @@ jobs:
           # Collect object files
           FIRST_OBJ=""
           OBJECT_ARGS=""
-          for obj in target/llvm-cov-target/profiling/deps/*; do
+          for obj in target/profiling/deps/*; do
             if [ -f "$obj" ] && file "$obj" | grep -q "ELF"; then
               if [ -z "$FIRST_OBJ" ]; then
                 FIRST_OBJ="$obj"
@@ -299,3 +299,6 @@ jobs:
             -Dsonar.test.inclusions=**/tests/**,**/*_test.rs
             -Dsonar.coverage.exclusions=**/tests/**,**/ffi.rs
             -Dsonar.rust.lcov.reportPaths=coverage/coverage_rust.lcov
+            -Dsonar.c.file.suffixes=-
+            -Dsonar.cpp.file.suffixes=-
+            -Dsonar.objc.file.suffixes=-

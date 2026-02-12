@@ -1,0 +1,31 @@
+# NOTICE
+
+g2d-rs
+Copyright 2025 Au-Zone Technologies
+
+This product includes software developed at Au-Zone Technologies
+(https://au-zone.com/).
+
+## Third-Party Components
+
+This project uses the following third-party components:
+
+### Rust Dependencies
+
+* four-char-code 2.3.0 (MIT OR Apache-2.0)
+  https://crates.io/crates/four-char-code
+
+* libloading 0.8 (ISC)
+  https://crates.io/crates/libloading
+
+* log 0.4 (MIT OR Apache-2.0)
+  https://crates.io/crates/log
+
+* nix 0.29 (MIT)
+  https://crates.io/crates/nix
+
+### NXP Components
+
+The G2D API header (`g2d.h`) is derived from NXP i.MX BSP and is subject
+to NXP's license terms. The header is used solely for generating FFI
+bindings and is not distributed in binary form.

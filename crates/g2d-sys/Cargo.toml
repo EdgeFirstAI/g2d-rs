@@ -1,0 +1,19 @@
+[package]
+name = "g2d-sys"
+description = "Low-level FFI bindings for NXP i.MX G2D 2D graphics accelerator"
+authors.workspace = true
+license.workspace = true
+version.workspace = true
+edition.workspace = true
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+keywords = ["g2d", "nxp", "imx8", "ffi", "graphics"]
+categories = ["external-ffi-bindings", "hardware-support", "multimedia::images"]
+documentation = "https://docs.rs/g2d-sys"
+
+[dependencies]
+four-char-code = { workspace = true }
+libloading = { workspace = true }
+log = { workspace = true }
+nix = { workspace = true }

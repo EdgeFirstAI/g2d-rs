@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+description = "Rust bindings for NXP i.MX G2D 2D graphics accelerator"
+authors = ["Au-Zone Technologies <support@au-zone.com>"]
+homepage = "https://edgefirst.ai"
+repository = "https://github.com/EdgeFirstAI/g2d-rs"
+license = "Apache-2.0"
+version = "1.1.0"
+edition = "2021"
+readme = "README.md"
+
+[workspace.dependencies]
+# External dependencies
+four-char-code = "2.3.0"
+libloading = "0.8"
+log = "0.4"
+nix = { version = "0.29", default-features = false, features = ["ioctl"] }
+
+# Internal crates
+g2d-sys = { version = "1.1.0", path = "crates/g2d-sys" }

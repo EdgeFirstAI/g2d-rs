@@ -6,10 +6,13 @@
 //! These tests require:
 //! - NXP i.MX hardware with G2D support
 //! - libg2d.so.2 installed
-//! - /dev/dma_heap available (CMA or system heap)
+//! - /dev/dma_heap available (uncached CMA preferred, cached CMA fallback)
 //! - /dev/galcore accessible
 //!
-//! Run with: cargo test --test hardware_tests
+//! Tests are organized by heap type (uncached vs cached) to isolate
+//! CPU cache coherency behavior and validate DMA_BUF_IOCTL_SYNC correctness.
+//!
+//! Run with: cargo test --test hardware_tests -- --test-threads=1 --nocapture
 
 #![cfg(target_os = "linux")]
 
@@ -18,12 +21,16 @@ use g2d_sys::{
     g2d_format_G2D_RGB888, g2d_format_G2D_RGBA8888, g2d_format_G2D_YUYV,
     g2d_rotation_G2D_ROTATION_0, G2DFormat, G2DPhysical, G2DSurface, G2D, NV12, RGB, RGBA, YUYV,
 };
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr;
+use std::time::Instant;
 
-// DMA-buf synchronization ioctl constants (linux/dma-buf.h)
+// =============================================================================
+// DMA-buf synchronization constants (linux/dma-buf.h)
+// =============================================================================
+
 const DMA_BUF_BASE: u8 = b'b';
-const DMA_BUF_IOCTL_SYNC: u8 = 0;
+const DMA_BUF_IOCTL_SYNC_NR: u8 = 0;
 
 const DMA_BUF_SYNC_READ: u64 = 1 << 0;
 const DMA_BUF_SYNC_WRITE: u64 = 1 << 1;
@@ -39,28 +46,219 @@ struct DmaBufSync {
 const DMA_BUF_IOCTL_SYNC_CMD: libc::c_ulong = (1 << 30)
     | ((std::mem::size_of::<DmaBufSync>() as libc::c_ulong) << 16)
     | ((DMA_BUF_BASE as libc::c_ulong) << 8)
-    | DMA_BUF_IOCTL_SYNC as libc::c_ulong;
+    | DMA_BUF_IOCTL_SYNC_NR as libc::c_ulong;
 
-/// Helper to allocate a DMA buffer and get its physical address
+// =============================================================================
+// DRM PRIME import — creates persistent dma_buf_attach for cache maintenance
+// =============================================================================
+//
+// The CMA heap's begin_cpu_access iterates over buffer->attachments to perform
+// cache maintenance via dma_sync_sgtable_for_cpu(). Without any active
+// attachments, DMA_BUF_IOCTL_SYNC is a no-op.
+//
+// By importing the DMA-buf fd through the DRM/GPU driver (DRM_IOCTL_PRIME_FD_TO_HANDLE),
+// the GPU driver creates a persistent dma_buf_attach(). This makes
+// DMA_BUF_IOCTL_SYNC actually perform cache invalidation/flush.
+
+const DRM_IOCTL_BASE: u8 = b'd';
+
+// DRM_IOCTL_PRIME_FD_TO_HANDLE = _IOWR('d', 0x2e, struct drm_prime_handle)
+#[repr(C)]
+struct DrmPrimeHandle {
+    handle: u32,
+    flags: u32,
+    fd: i32,
+}
+
+const DRM_IOCTL_PRIME_FD_TO_HANDLE: libc::c_ulong = (3 << 30) // _IOWR
+    | ((std::mem::size_of::<DrmPrimeHandle>() as libc::c_ulong) << 16)
+    | ((DRM_IOCTL_BASE as libc::c_ulong) << 8)
+    | 0x2e;
+
+// DRM_IOCTL_GEM_CLOSE = _IOW('d', 0x09, struct drm_gem_close)
+#[repr(C)]
+struct DrmGemClose {
+    handle: u32,
+    pad: u32,
+}
+
+const DRM_IOCTL_GEM_CLOSE: libc::c_ulong = (1 << 30) // _IOW
+    | ((std::mem::size_of::<DrmGemClose>() as libc::c_ulong) << 16)
+    | ((DRM_IOCTL_BASE as libc::c_ulong) << 8)
+    | 0x09;
+
+/// Holds a DRM GEM handle that keeps a persistent dma_buf_attach alive.
+/// When dropped, closes the GEM handle (which detaches the DMA-buf).
+struct DrmAttachment {
+    drm_fd: OwnedFd,
+    gem_handle: u32,
+}
+
+impl DrmAttachment {
+    /// Import a DMA-buf fd through the GPU DRM driver to create a persistent
+    /// dma_buf_attach. Returns None if /dev/dri/renderD128 is not available.
+    fn new(dma_buf_fd: &OwnedFd) -> Option<Self> {
+        let path = b"/dev/dri/renderD128\0";
+        let raw_fd = unsafe {
+            libc::open(
+                path.as_ptr() as *const libc::c_char,
+                libc::O_RDWR | libc::O_CLOEXEC,
+            )
+        };
+        if raw_fd < 0 {
+            eprintln!(
+                "  DrmAttachment: /dev/dri/renderD128 not available: {}",
+                std::io::Error::last_os_error()
+            );
+            return None;
+        }
+        let drm_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+
+        let mut prime = DrmPrimeHandle {
+            handle: 0,
+            flags: 0,
+            fd: dma_buf_fd.as_raw_fd(),
+        };
+
+        let ret =
+            unsafe { libc::ioctl(drm_fd.as_raw_fd(), DRM_IOCTL_PRIME_FD_TO_HANDLE, &mut prime) };
+        if ret == -1 {
+            eprintln!(
+                "  DrmAttachment: PRIME_FD_TO_HANDLE failed: {}",
+                std::io::Error::last_os_error()
+            );
+            return None;
+        }
+
+        eprintln!("  DrmAttachment: imported as GEM handle {}", prime.handle);
+
+        Some(Self {
+            drm_fd,
+            gem_handle: prime.handle,
+        })
+    }
+}
+
+impl Drop for DrmAttachment {
+    fn drop(&mut self) {
+        let close = DrmGemClose {
+            handle: self.gem_handle,
+            pad: 0,
+        };
+        unsafe { libc::ioctl(self.drm_fd.as_raw_fd(), DRM_IOCTL_GEM_CLOSE, &close) };
+    }
+}
+
+// =============================================================================
+// Heap type abstraction
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum HeapType {
+    /// `/dev/dma_heap/linux,cma-uncached` — non-cacheable mapping, GPU writes
+    /// are immediately visible to CPU reads without cache maintenance.
+    Uncached,
+    /// `/dev/dma_heap/linux,cma` — cached mapping, requires DMA_BUF_IOCTL_SYNC
+    /// for CPU cache coherency after GPU DMA writes.
+    Cached,
+}
+
+impl HeapType {
+    fn name(&self) -> &str {
+        match self {
+            HeapType::Uncached => "linux,cma-uncached",
+            HeapType::Cached => "linux,cma",
+        }
+    }
+
+    fn heap_kind(&self) -> HeapKind {
+        match self {
+            HeapType::Uncached => {
+                HeapKind::Custom(std::path::PathBuf::from("/dev/dma_heap/linux,cma-uncached"))
+            }
+            HeapType::Cached => HeapKind::Cma,
+        }
+    }
+
+    fn is_available(&self) -> bool {
+        Heap::new(self.heap_kind()).is_ok()
+    }
+}
+
+impl std::fmt::Display for HeapType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
+/// Run a test body with the given heap type, skipping if unavailable.
+fn with_heap<F>(heap_type: HeapType, test_name: &str, f: F)
+where
+    F: FnOnce(HeapType),
+{
+    let _ = env_logger::try_init();
+    if !heap_type.is_available() {
+        eprintln!("SKIP {test_name}: {heap_type} heap not available");
+        return;
+    }
+    eprintln!("RUN  {test_name} on {heap_type} heap");
+    f(heap_type);
+    eprintln!("PASS {test_name} on {heap_type} heap");
+}
+
+/// Macro to generate cached and uncached variants of a test.
+macro_rules! heap_tests {
+    ($base:ident, $body:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<$base _uncached>]() {
+                with_heap(HeapType::Uncached, stringify!([<$base _uncached>]), |h| $body(h));
+            }
+
+            #[test]
+            fn [<$base _cached>]() {
+                with_heap(HeapType::Cached, stringify!([<$base _cached>]), |h| $body(h));
+            }
+        }
+    };
+}
+
+// =============================================================================
+// DMA Buffer with persistent mmap and proper DMA_BUF_IOCTL_SYNC
+// =============================================================================
+
+/// DMA buffer with persistent mmap and correct DMA_BUF_IOCTL_SYNC usage.
+///
+/// The buffer is mmapped once on creation and munmapped on drop. CPU access
+/// is bracketed by SYNC_START/SYNC_END ioctls with full return value checking.
+///
+/// This follows the Linux DMA-buf CPU access protocol:
+/// 1. `DMA_BUF_IOCTL_SYNC` with `SYNC_START` — begin CPU access
+/// 2. CPU reads/writes via the persistent mmap
+/// 3. `DMA_BUF_IOCTL_SYNC` with `SYNC_END` — end CPU access
 struct DmaBuffer {
-    #[allow(dead_code)] // Kept for RAII - fd must outlive the mmap
     fd: OwnedFd,
-    ptr: *mut u8,
     phys: G2DPhysical,
+    ptr: *mut u8,
     size: usize,
+    heap_type: HeapType,
+    /// DRM PRIME import handle — keeps a persistent dma_buf_attach alive so that
+    /// DMA_BUF_IOCTL_SYNC actually performs cache maintenance on cached heaps.
+    _drm_attachment: Option<DrmAttachment>,
 }
 
 impl DmaBuffer {
-    fn new(size: usize) -> Result<Self, Box<dyn std::error::Error>> {
-        let heap = Heap::new(HeapKind::Cma)
-            .or_else(|_| Heap::new(HeapKind::System))
-            .map_err(|e| format!("Failed to open DMA heap: {e}"))?;
+    fn new(heap_type: HeapType, size: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        let heap = Heap::new(heap_type.heap_kind())
+            .map_err(|e| format!("Failed to open {heap_type} heap: {e}"))?;
 
         let fd = heap
             .allocate(size)
-            .map_err(|e| format!("Failed to allocate DMA buffer: {e}"))?;
+            .map_err(|e| format!("Failed to allocate {size} bytes from {heap_type} heap: {e}"))?;
 
-        // mmap the buffer
+        let phys = G2DPhysical::new(fd.as_raw_fd())?;
+
+        // Persistent mmap — mapped once for the buffer's lifetime
         let ptr = unsafe {
             libc::mmap(
                 ptr::null_mut(),
@@ -71,18 +269,36 @@ impl DmaBuffer {
                 0,
             )
         };
-
         if ptr == libc::MAP_FAILED {
-            return Err(format!("mmap failed: {}", std::io::Error::last_os_error()).into());
+            return Err(format!(
+                "mmap failed for {heap_type} heap buffer ({size} bytes): {}",
+                std::io::Error::last_os_error()
+            )
+            .into());
         }
 
-        let phys = G2DPhysical::new(fd.as_raw_fd())?;
+        // For cached heaps, create a persistent DRM PRIME import so that
+        // DMA_BUF_IOCTL_SYNC actually performs cache maintenance.
+        // Without this, begin_cpu_access iterates an empty attachment list.
+        let drm_attachment = if heap_type == HeapType::Cached {
+            DrmAttachment::new(&fd)
+        } else {
+            None
+        };
+
+        eprintln!(
+            "  DmaBuffer: {size} bytes from {heap_type} heap, phys=0x{:x}, drm_attach={}",
+            phys.address(),
+            drm_attachment.is_some()
+        );
 
         Ok(Self {
             fd,
-            ptr: ptr as *mut u8,
             phys,
+            ptr: ptr as *mut u8,
             size,
+            heap_type,
+            _drm_attachment: drm_attachment,
         })
     }
 
@@ -90,71 +306,70 @@ impl DmaBuffer {
         self.phys.address()
     }
 
-    /// Begin CPU access for reading. Must be paired with `end_cpu_read()`.
-    fn begin_cpu_read(&self) {
-        let sync = DmaBufSync {
-            flags: DMA_BUF_SYNC_READ | DMA_BUF_SYNC_START,
-        };
-        unsafe {
-            libc::ioctl(self.fd.as_raw_fd(), DMA_BUF_IOCTL_SYNC_CMD, &sync);
-        }
+    /// Perform DMA_BUF_IOCTL_SYNC with full error checking.
+    fn dma_buf_sync(&self, flags: u64) {
+        let sync = DmaBufSync { flags };
+        let ret = unsafe { libc::ioctl(self.fd.as_raw_fd(), DMA_BUF_IOCTL_SYNC_CMD, &sync) };
+        assert_ne!(
+            ret,
+            -1,
+            "DMA_BUF_IOCTL_SYNC (flags=0x{:x}) failed on {heap} heap: {err}",
+            flags,
+            heap = self.heap_type,
+            err = std::io::Error::last_os_error()
+        );
     }
 
-    /// End CPU access for reading.
-    fn end_cpu_read(&self) {
-        let sync = DmaBufSync {
-            flags: DMA_BUF_SYNC_READ | DMA_BUF_SYNC_END,
-        };
-        unsafe {
-            libc::ioctl(self.fd.as_raw_fd(), DMA_BUF_IOCTL_SYNC_CMD, &sync);
-        }
+    /// Begin CPU access with the given direction flags.
+    fn sync_start(&self, flags: u64) {
+        self.dma_buf_sync(flags | DMA_BUF_SYNC_START);
     }
 
-    /// Begin CPU access for writing. Must be paired with `end_cpu_write()`.
-    fn begin_cpu_write(&self) {
-        let sync = DmaBufSync {
-            flags: DMA_BUF_SYNC_WRITE | DMA_BUF_SYNC_START,
-        };
-        unsafe {
-            libc::ioctl(self.fd.as_raw_fd(), DMA_BUF_IOCTL_SYNC_CMD, &sync);
-        }
+    /// End CPU access with the given direction flags.
+    fn sync_end(&self, flags: u64) {
+        self.dma_buf_sync(flags | DMA_BUF_SYNC_END);
     }
 
-    /// End CPU access for writing.
-    fn end_cpu_write(&self) {
-        let sync = DmaBufSync {
-            flags: DMA_BUF_SYNC_WRITE | DMA_BUF_SYNC_END,
-        };
-        unsafe {
-            libc::ioctl(self.fd.as_raw_fd(), DMA_BUF_IOCTL_SYNC_CMD, &sync);
-        }
-    }
-
-    /// Write data to the buffer with proper DMA-buf sync.
-    fn write_with<F: FnOnce(&mut [u8])>(&mut self, f: F) {
-        self.begin_cpu_write();
+    /// Write to the buffer with proper sync bracketing.
+    ///
+    /// Uses `DMA_BUF_SYNC_WRITE` — tells the kernel the CPU will write,
+    /// so it can clean/flush caches on SYNC_END.
+    fn write_with<F: FnOnce(&mut [u8])>(&self, f: F) {
+        self.sync_start(DMA_BUF_SYNC_WRITE);
         f(unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size) });
-        self.end_cpu_write();
+        self.sync_end(DMA_BUF_SYNC_WRITE);
     }
 
-    /// Read data from the buffer with proper DMA-buf sync.
+    /// Read from the buffer with proper sync bracketing.
+    ///
+    /// Uses `DMA_BUF_SYNC_READ` — tells the kernel the CPU will read,
+    /// so it can invalidate caches on SYNC_START to see GPU/DMA writes.
     fn read_with<F: FnOnce(&[u8]) -> T, T>(&self, f: F) -> T {
-        self.begin_cpu_read();
+        self.sync_start(DMA_BUF_SYNC_READ);
         let result = f(unsafe { std::slice::from_raw_parts(self.ptr, self.size) });
-        self.end_cpu_read();
+        self.sync_end(DMA_BUF_SYNC_READ);
         result
     }
 }
 
 impl Drop for DmaBuffer {
     fn drop(&mut self) {
-        unsafe {
-            libc::munmap(self.ptr as *mut libc::c_void, self.size);
+        let ret = unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.size) };
+        if ret != 0 {
+            eprintln!(
+                "WARNING: munmap failed for {heap} heap buffer: {err}",
+                heap = self.heap_type,
+                err = std::io::Error::last_os_error()
+            );
         }
     }
 }
 
-/// Create a G2DSurface for a buffer with given dimensions and format
+// =============================================================================
+// Surface creation helpers
+// =============================================================================
+
+/// Create a G2DSurface for a DMA buffer with given dimensions and format.
 fn create_surface(buf: &DmaBuffer, width: usize, height: usize, format: u32) -> G2DSurface {
     G2DSurface {
         format,
@@ -173,7 +388,7 @@ fn create_surface(buf: &DmaBuffer, width: usize, height: usize, format: u32) -> 
     }
 }
 
-/// Create a G2DSurface for NV12 (two-plane format)
+/// Create a G2DSurface for NV12 (two-plane format).
 fn create_nv12_surface(buf: &DmaBuffer, width: usize, height: usize) -> G2DSurface {
     let uv_offset = (width * height) as u64;
     G2DSurface {
@@ -194,7 +409,7 @@ fn create_nv12_surface(buf: &DmaBuffer, width: usize, height: usize) -> G2DSurfa
 }
 
 // =============================================================================
-// Basic API Tests
+// Basic API Tests (no DMA heap dependency)
 // =============================================================================
 
 #[test]
@@ -205,9 +420,7 @@ fn test_g2d_open_close() {
     assert!(g2d.is_ok(), "Failed to open G2D: {:?}", g2d.err());
 
     let g2d = g2d.unwrap();
-    println!("G2D version: {}", g2d.version());
-
-    // G2D is closed on drop
+    eprintln!("G2D version: {}", g2d.version());
 }
 
 #[test]
@@ -217,7 +430,6 @@ fn test_g2d_version_detection() {
     let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
     let version = g2d.version();
 
-    // Version should be reasonable (major >= 5, minor >= 0)
     assert!(
         version.major >= 5,
         "Unexpected major version: {}",
@@ -229,7 +441,7 @@ fn test_g2d_version_detection() {
         version.minor
     );
 
-    println!("Detected G2D version: {version}");
+    eprintln!("Detected G2D version: {version}");
 }
 
 #[test]
@@ -238,11 +450,9 @@ fn test_g2d_colorspace_configuration() {
 
     let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
 
-    // Test BT.709 colorspace
     let result = g2d.set_bt709_colorspace();
     assert!(result.is_ok(), "Failed to set BT.709: {:?}", result.err());
 
-    // Test BT.601 colorspace
     let result = g2d.set_bt601_colorspace();
     assert!(result.is_ok(), "Failed to set BT.601: {:?}", result.err());
 }
@@ -253,7 +463,6 @@ fn test_g2d_colorspace_configuration() {
 
 #[test]
 fn test_g2d_format_conversion() {
-    // Test FourCharCode to G2DFormat conversion
     let rgba = G2DFormat::try_from(RGBA);
     assert!(rgba.is_ok(), "RGBA format conversion failed");
     assert_eq!(rgba.unwrap().format(), g2d_format_G2D_RGBA8888);
@@ -271,31 +480,61 @@ fn test_g2d_format_conversion() {
 }
 
 // =============================================================================
-// Clear Operation Tests
+// Heap Availability Tests
 // =============================================================================
 
 #[test]
-fn test_g2d_clear_rgba() {
+fn test_heap_availability() {
     let _ = env_logger::try_init();
 
+    for heap_type in [HeapType::Uncached, HeapType::Cached] {
+        if heap_type.is_available() {
+            eprintln!("  {heap_type}: AVAILABLE");
+        } else {
+            eprintln!("  {heap_type}: NOT AVAILABLE");
+        }
+    }
+
+    // At least one heap must be available for the test suite to be useful
+    assert!(
+        HeapType::Uncached.is_available() || HeapType::Cached.is_available(),
+        "No DMA heap available — cannot run hardware tests"
+    );
+}
+
+// =============================================================================
+// Physical Address Tests
+// =============================================================================
+
+fn physical_address_test(heap_type: HeapType) {
+    let size = 4096;
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+
+    let phys_addr = buf.address();
+    assert!(phys_addr != 0, "Physical address should not be zero");
+    eprintln!("  Physical address: 0x{phys_addr:x}");
+}
+heap_tests!(test_g2d_physical_address, physical_address_test);
+
+// =============================================================================
+// Clear Operation Tests (DMA-buf buffers, uncached + cached)
+// =============================================================================
+
+fn clear_rgba_test(heap_type: HeapType) {
     let width = 64;
     let height = 64;
-    let size = width * height * 4; // RGBA = 4 bytes per pixel
+    let size = width * height * 4;
 
-    let mut buf = DmaBuffer::new(size).expect("Failed to allocate DMA buffer");
-
-    // Initialize to zeros
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
     buf.write_with(|data| data.fill(0));
 
     let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
     let mut surface = create_surface(&buf, width, height, g2d_format_G2D_RGBA8888);
 
-    // Clear to red (RGBA: 255, 0, 0, 255)
     let color = [255u8, 0, 0, 255];
     let result = g2d.clear(&mut surface, color);
     assert!(result.is_ok(), "G2D clear failed: {:?}", result.err());
 
-    // Verify the buffer was filled with red
     buf.read_with(|data| {
         for i in 0..10 {
             let offset = i * 4;
@@ -305,23 +544,18 @@ fn test_g2d_clear_rgba() {
             assert_eq!(data[offset + 3], 255, "Alpha channel mismatch at pixel {i}");
         }
     });
-
-    println!("G2D clear RGBA test passed");
 }
+heap_tests!(test_g2d_clear_rgba, clear_rgba_test);
 
-#[test]
-fn test_g2d_clear_multiple_colors() {
-    let _ = env_logger::try_init();
-
+fn clear_multiple_colors_test(heap_type: HeapType) {
     let width = 32;
     let height = 32;
     let size = width * height * 4;
 
-    let buf = DmaBuffer::new(size).expect("Failed to allocate DMA buffer");
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
     let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
     let mut surface = create_surface(&buf, width, height, g2d_format_G2D_RGBA8888);
 
-    // Test multiple colors
     let colors = [
         [255, 0, 0, 255],     // Red
         [0, 255, 0, 255],     // Green
@@ -339,41 +573,70 @@ fn test_g2d_clear_multiple_colors() {
             result.err()
         );
 
-        // Spot check first pixel
         buf.read_with(|data| {
-            assert_eq!(data[0], color[0], "Color mismatch for {color:?}");
-            assert_eq!(data[1], color[1], "Color mismatch for {color:?}");
-            assert_eq!(data[2], color[2], "Color mismatch for {color:?}");
-            assert_eq!(data[3], color[3], "Color mismatch for {color:?}");
+            for pixel in [0, 10, 100, width * height - 1] {
+                let offset = pixel * 4;
+                assert_eq!(
+                    &data[offset..offset + 4],
+                    &color,
+                    "Color mismatch at pixel {pixel} for {color:?}"
+                );
+            }
         });
     }
-
-    println!("G2D clear multiple colors test passed");
 }
+heap_tests!(test_g2d_clear_multiple_colors, clear_multiple_colors_test);
+
+fn clear_large_surface_test(heap_type: HeapType) {
+    let width = 1920;
+    let height = 1080;
+    let size = width * height * 4;
+
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+    let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+    let mut surface = create_surface(&buf, width, height, g2d_format_G2D_RGBA8888);
+
+    let color = [0u8, 128, 255, 255]; // Blue-ish
+    let result = g2d.clear(&mut surface, color);
+    assert!(result.is_ok(), "G2D clear 1080p failed: {:?}", result.err());
+
+    buf.read_with(|data| {
+        let pixels_to_check = [
+            0,                                // top-left
+            width - 1,                        // top-right
+            (height / 2) * width + width / 2, // center
+            (height - 1) * width,             // bottom-left
+            (height - 1) * width + width - 1, // bottom-right
+        ];
+        for pixel in pixels_to_check {
+            let offset = pixel * 4;
+            assert_eq!(
+                &data[offset..offset + 4],
+                &color,
+                "Color mismatch at pixel {pixel}"
+            );
+        }
+    });
+}
+heap_tests!(test_g2d_clear_large_surface, clear_large_surface_test);
 
 // =============================================================================
 // Blit Operation Tests
 // =============================================================================
 
-#[test]
-fn test_g2d_blit_rgba_to_rgba() {
-    let _ = env_logger::try_init();
-
+fn blit_rgba_to_rgba_test(heap_type: HeapType) {
     let width = 64;
     let height = 64;
     let size = width * height * 4;
 
-    let mut src_buf = DmaBuffer::new(size).expect("Failed to allocate src buffer");
-    let mut dst_buf = DmaBuffer::new(size).expect("Failed to allocate dst buffer");
+    let src_buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate src buffer");
+    let dst_buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate dst buffer");
 
-    // Fill source with a pattern
     src_buf.write_with(|data| {
         for (i, byte) in data.iter_mut().enumerate() {
             *byte = (i % 256) as u8;
         }
     });
-
-    // Clear destination
     dst_buf.write_with(|data| data.fill(0));
 
     let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
@@ -386,29 +649,20 @@ fn test_g2d_blit_rgba_to_rgba() {
     let result = g2d.blit(&src_surface, &dst_surface);
     assert!(result.is_ok(), "G2D blit failed: {:?}", result.err());
 
-    // Verify destination matches source
-    src_buf.begin_cpu_read();
-    dst_buf.begin_cpu_read();
-    let src_data = unsafe { std::slice::from_raw_parts(src_buf.ptr, src_buf.size) };
-    let dst_data = unsafe { std::slice::from_raw_parts(dst_buf.ptr, dst_buf.size) };
-
-    for i in 0..100 {
-        assert_eq!(
-            src_data[i], dst_data[i],
-            "Data mismatch at byte {i}: src={} dst={}",
-            src_data[i], dst_data[i]
-        );
-    }
-    dst_buf.end_cpu_read();
-    src_buf.end_cpu_read();
-
-    println!("G2D blit RGBA to RGBA test passed");
+    let src_snapshot = src_buf.read_with(|data| data[..100].to_vec());
+    dst_buf.read_with(|data| {
+        for i in 0..100 {
+            assert_eq!(
+                src_snapshot[i], data[i],
+                "Data mismatch at byte {i}: src={} dst={}",
+                src_snapshot[i], data[i]
+            );
+        }
+    });
 }
+heap_tests!(test_g2d_blit_rgba_to_rgba, blit_rgba_to_rgba_test);
 
-#[test]
-fn test_g2d_blit_with_scaling() {
-    let _ = env_logger::try_init();
-
+fn blit_with_scaling_test(heap_type: HeapType) {
     let src_width = 128;
     let src_height = 128;
     let dst_width = 64;
@@ -417,22 +671,20 @@ fn test_g2d_blit_with_scaling() {
     let src_size = src_width * src_height * 4;
     let dst_size = dst_width * dst_height * 4;
 
-    let mut src_buf = DmaBuffer::new(src_size).expect("Failed to allocate src buffer");
-    let mut dst_buf = DmaBuffer::new(dst_size).expect("Failed to allocate dst buffer");
+    let src_buf = DmaBuffer::new(heap_type, src_size).expect("Failed to allocate src buffer");
+    let dst_buf = DmaBuffer::new(heap_type, dst_size).expect("Failed to allocate dst buffer");
 
-    // Fill source with a gradient pattern
     src_buf.write_with(|slice| {
         for y in 0..src_height {
             for x in 0..src_width {
                 let offset = (y * src_width + x) * 4;
-                slice[offset] = (x * 2) as u8; // R
-                slice[offset + 1] = (y * 2) as u8; // G
-                slice[offset + 2] = 128; // B
-                slice[offset + 3] = 255; // A
+                slice[offset] = (x * 2) as u8;
+                slice[offset + 1] = (y * 2) as u8;
+                slice[offset + 2] = 128;
+                slice[offset + 3] = 255;
             }
         }
     });
-
     dst_buf.write_with(|data| data.fill(0));
 
     let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
@@ -449,7 +701,6 @@ fn test_g2d_blit_with_scaling() {
         result.err()
     );
 
-    // Verify destination is not all zeros (scaling happened)
     dst_buf.read_with(|dst_data| {
         let non_zero_count = dst_data.iter().filter(|&&b| b != 0).count();
         assert!(
@@ -457,33 +708,27 @@ fn test_g2d_blit_with_scaling() {
             "Destination buffer appears empty after scaling"
         );
     });
-
-    println!("G2D blit with scaling test passed");
 }
+heap_tests!(test_g2d_blit_with_scaling, blit_with_scaling_test);
 
-#[test]
-fn test_g2d_blit_rgba_to_rgb() {
-    let _ = env_logger::try_init();
-
+fn blit_rgba_to_rgb_test(heap_type: HeapType) {
     let width = 64;
     let height = 64;
     let src_size = width * height * 4; // RGBA
     let dst_size = width * height * 3; // RGB
 
-    let mut src_buf = DmaBuffer::new(src_size).expect("Failed to allocate src buffer");
-    let mut dst_buf = DmaBuffer::new(dst_size).expect("Failed to allocate dst buffer");
+    let src_buf = DmaBuffer::new(heap_type, src_size).expect("Failed to allocate src buffer");
+    let dst_buf = DmaBuffer::new(heap_type, dst_size).expect("Failed to allocate dst buffer");
 
-    // Fill source with known values (red)
     src_buf.write_with(|slice| {
         for i in 0..(width * height) {
             let offset = i * 4;
-            slice[offset] = 255; // R
-            slice[offset + 1] = 0; // G
-            slice[offset + 2] = 0; // B
-            slice[offset + 3] = 255; // A
+            slice[offset] = 255;
+            slice[offset + 1] = 0;
+            slice[offset + 2] = 0;
+            slice[offset + 3] = 255;
         }
     });
-
     dst_buf.write_with(|data| data.fill(0));
 
     let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
@@ -500,7 +745,6 @@ fn test_g2d_blit_rgba_to_rgb() {
         result.err()
     );
 
-    // Verify destination has red values
     dst_buf.read_with(|dst_data| {
         for i in 0..10 {
             let offset = i * 3;
@@ -517,27 +761,22 @@ fn test_g2d_blit_rgba_to_rgb() {
             );
         }
     });
-
-    println!("G2D blit RGBA to RGB test passed");
 }
+heap_tests!(test_g2d_blit_rgba_to_rgb, blit_rgba_to_rgb_test);
 
 // =============================================================================
 // YUV Format Tests
 // =============================================================================
 
-#[test]
-fn test_g2d_blit_yuyv_to_rgba() {
-    let _ = env_logger::try_init();
-
+fn blit_yuyv_to_rgba_test(heap_type: HeapType) {
     let width = 64;
     let height = 64;
     let src_size = width * height * 2; // YUYV = 2 bytes per pixel
     let dst_size = width * height * 4; // RGBA
 
-    let mut src_buf = DmaBuffer::new(src_size).expect("Failed to allocate src buffer");
-    let mut dst_buf = DmaBuffer::new(dst_size).expect("Failed to allocate dst buffer");
+    let src_buf = DmaBuffer::new(heap_type, src_size).expect("Failed to allocate src buffer");
+    let dst_buf = DmaBuffer::new(heap_type, dst_size).expect("Failed to allocate dst buffer");
 
-    // Fill with YUYV pattern (gray: Y=128, U=128, V=128)
     src_buf.write_with(|slice| {
         for i in 0..(src_size / 4) {
             let offset = i * 4;
@@ -547,7 +786,6 @@ fn test_g2d_blit_yuyv_to_rgba() {
             slice[offset + 3] = 128; // V
         }
     });
-
     dst_buf.write_with(|data| data.fill(0));
 
     let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
@@ -564,7 +802,6 @@ fn test_g2d_blit_yuyv_to_rgba() {
         result.err()
     );
 
-    // Verify output is not empty (gray should convert to approximately gray in RGB)
     dst_buf.read_with(|dst_data| {
         let non_zero = dst_data.iter().filter(|&&b| b != 0).count();
         assert!(
@@ -572,30 +809,23 @@ fn test_g2d_blit_yuyv_to_rgba() {
             "Destination appears empty after YUV conversion"
         );
     });
-
-    println!("G2D blit YUYV to RGBA test passed");
 }
+heap_tests!(test_g2d_blit_yuyv_to_rgba, blit_yuyv_to_rgba_test);
 
-#[test]
-fn test_g2d_blit_nv12_to_rgba() {
-    let _ = env_logger::try_init();
-
+fn blit_nv12_to_rgba_test(heap_type: HeapType) {
     let width = 64;
     let height = 64;
-    // NV12: Y plane (width*height) + UV plane (width*height/2)
-    let src_size = width * height + width * height / 2;
-    let dst_size = width * height * 4; // RGBA
+    let src_size = width * height + width * height / 2; // Y + UV
+    let dst_size = width * height * 4;
 
-    let mut src_buf = DmaBuffer::new(src_size).expect("Failed to allocate src buffer");
-    let mut dst_buf = DmaBuffer::new(dst_size).expect("Failed to allocate dst buffer");
+    let src_buf = DmaBuffer::new(heap_type, src_size).expect("Failed to allocate src buffer");
+    let dst_buf = DmaBuffer::new(heap_type, dst_size).expect("Failed to allocate dst buffer");
 
-    // Fill Y plane with 128 (gray) and UV plane with 128 (neutral chroma)
     let y_size = width * height;
     src_buf.write_with(|data| {
         data[..y_size].fill(128);
         data[y_size..].fill(128);
     });
-
     dst_buf.write_with(|data| data.fill(0));
 
     let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
@@ -612,7 +842,6 @@ fn test_g2d_blit_nv12_to_rgba() {
         result.err()
     );
 
-    // Verify output is not empty
     dst_buf.read_with(|dst_data| {
         let non_zero = dst_data.iter().filter(|&&b| b != 0).count();
         assert!(
@@ -620,26 +849,327 @@ fn test_g2d_blit_nv12_to_rgba() {
             "Destination appears empty after NV12 conversion"
         );
     });
-
-    println!("G2D blit NV12 to RGBA test passed");
 }
+heap_tests!(test_g2d_blit_nv12_to_rgba, blit_nv12_to_rgba_test);
 
 // =============================================================================
-// Physical Address Tests
+// Cache Coherency Correctness Tests (Phase 2)
 // =============================================================================
 
-#[test]
-fn test_g2d_physical_address() {
-    let _ = env_logger::try_init();
+/// Double-write overwrite test — the most likely to expose stale cache issues.
+///
+/// Sequence:
+/// 1. GPU clears buffer with color A
+/// 2. CPU reads and verifies color A
+/// 3. GPU clears same buffer with color B
+/// 4. CPU reads and verifies color B (must NOT see stale color A)
+fn double_write_overwrite_test(heap_type: HeapType) {
+    let width = 64;
+    let height = 64;
+    let size = width * height * 4;
 
-    let size = 4096;
-    let buf = DmaBuffer::new(size).expect("Failed to allocate DMA buffer");
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+    let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+    let mut surface = create_surface(&buf, width, height, g2d_format_G2D_RGBA8888);
 
-    let phys_addr = buf.address();
-    assert!(phys_addr != 0, "Physical address should not be zero");
+    let color_a = [255u8, 0, 0, 255]; // Red
+    let color_b = [0u8, 0, 255, 255]; // Blue
 
-    println!("Physical address: 0x{:x}", phys_addr);
+    // Step 1: GPU clears with color A
+    let result = g2d.clear(&mut surface, color_a);
+    assert!(
+        result.is_ok(),
+        "Clear with color A failed: {:?}",
+        result.err()
+    );
+
+    // Step 2: CPU reads — should see color A
+    buf.read_with(|data| {
+        for pixel in [0, 100, width * height / 2, width * height - 1] {
+            let offset = pixel * 4;
+            assert_eq!(
+                &data[offset..offset + 4],
+                &color_a,
+                "Step 2: expected color A at pixel {pixel}, got {:?}",
+                &data[offset..offset + 4]
+            );
+        }
+    });
+
+    // Step 3: GPU clears with color B (overwrite)
+    let result = g2d.clear(&mut surface, color_b);
+    assert!(
+        result.is_ok(),
+        "Clear with color B failed: {:?}",
+        result.err()
+    );
+
+    // Step 4: CPU reads — MUST see color B, not stale color A
+    buf.read_with(|data| {
+        for pixel in [0, 100, width * height / 2, width * height - 1] {
+            let offset = pixel * 4;
+            assert_eq!(
+                &data[offset..offset + 4],
+                &color_b,
+                "Step 4: STALE DATA — expected color B at pixel {pixel}, got {:?} (color A was {:?})",
+                &data[offset..offset + 4],
+                color_a
+            );
+        }
+    });
 }
+heap_tests!(test_double_write_overwrite, double_write_overwrite_test);
+
+/// Multiple reads without intervening GPU operations.
+///
+/// After a single GPU write, multiple CPU reads should all return the same data.
+fn multi_read_consistency_test(heap_type: HeapType) {
+    let width = 64;
+    let height = 64;
+    let size = width * height * 4;
+
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+    let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+    let mut surface = create_surface(&buf, width, height, g2d_format_G2D_RGBA8888);
+
+    let color = [0u8, 255, 0, 255]; // Green
+    let result = g2d.clear(&mut surface, color);
+    assert!(result.is_ok(), "Clear failed: {:?}", result.err());
+
+    // Read 5 times — all must return the same data
+    for read_num in 0..5 {
+        buf.read_with(|data| {
+            for pixel in [0, width * height / 2, width * height - 1] {
+                let offset = pixel * 4;
+                assert_eq!(
+                    &data[offset..offset + 4],
+                    &color,
+                    "Read #{read_num}: color mismatch at pixel {pixel}"
+                );
+            }
+        });
+    }
+}
+heap_tests!(test_multi_read_consistency, multi_read_consistency_test);
+
+/// Full CPU-write, GPU-read, GPU-write, CPU-read round-trip.
+///
+/// 1. CPU writes known pattern to source buffer
+/// 2. GPU blits source → destination
+/// 3. CPU reads destination and verifies pattern
+fn cpu_gpu_roundtrip_test(heap_type: HeapType) {
+    let width = 64;
+    let height = 64;
+    let size = width * height * 4;
+
+    let src_buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate src buffer");
+    let dst_buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate dst buffer");
+
+    // CPU writes a known pattern to source
+    src_buf.write_with(|data| {
+        for i in 0..(width * height) {
+            let offset = i * 4;
+            data[offset] = (i % 251) as u8; // R (prime to avoid period alignment)
+            data[offset + 1] = ((i * 3) % 251) as u8; // G
+            data[offset + 2] = ((i * 7) % 251) as u8; // B
+            data[offset + 3] = 255; // A
+        }
+    });
+    dst_buf.write_with(|data| data.fill(0));
+
+    // GPU blits source → destination
+    let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+    g2d.set_bt709_colorspace()
+        .expect("Failed to set colorspace");
+
+    let src_surface = create_surface(&src_buf, width, height, g2d_format_G2D_RGBA8888);
+    let dst_surface = create_surface(&dst_buf, width, height, g2d_format_G2D_RGBA8888);
+
+    let result = g2d.blit(&src_surface, &dst_surface);
+    assert!(result.is_ok(), "Blit failed: {:?}", result.err());
+
+    // CPU reads destination — should match the pattern written to source
+    let src_snapshot = src_buf.read_with(|data| data.to_vec());
+    dst_buf.read_with(|dst_data| {
+        let total_pixels = width * height;
+        let mut mismatches = 0;
+        for i in 0..total_pixels {
+            let offset = i * 4;
+            if dst_data[offset..offset + 4] != src_snapshot[offset..offset + 4] {
+                if mismatches < 5 {
+                    eprintln!(
+                        "  Mismatch at pixel {i}: src={:?} dst={:?}",
+                        &src_snapshot[offset..offset + 4],
+                        &dst_data[offset..offset + 4]
+                    );
+                }
+                mismatches += 1;
+            }
+        }
+        assert_eq!(
+            mismatches, 0,
+            "Round-trip had {mismatches}/{total_pixels} pixel mismatches"
+        );
+    });
+}
+heap_tests!(test_cpu_gpu_roundtrip, cpu_gpu_roundtrip_test);
+
+/// Sequential color cycling test — clears the same buffer with 6 different colors
+/// in sequence, verifying every pixel after each clear. This tests that the
+/// persistent mmap + sync correctly reflects each new GPU write.
+fn sequential_color_cycle_test(heap_type: HeapType) {
+    let width = 128;
+    let height = 128;
+    let size = width * height * 4;
+
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+    let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+    let mut surface = create_surface(&buf, width, height, g2d_format_G2D_RGBA8888);
+
+    let colors: [[u8; 4]; 6] = [
+        [255, 0, 0, 255],     // Red
+        [0, 255, 0, 255],     // Green
+        [0, 0, 255, 255],     // Blue
+        [128, 128, 128, 255], // Gray
+        [0, 0, 0, 255],       // Black
+        [255, 255, 255, 255], // White
+    ];
+
+    for (round, color) in colors.iter().enumerate() {
+        let result = g2d.clear(&mut surface, *color);
+        assert!(
+            result.is_ok(),
+            "Round {round}: clear with {color:?} failed: {:?}",
+            result.err()
+        );
+
+        // Verify ALL pixels
+        buf.read_with(|data| {
+            let total_pixels = width * height;
+            let mut mismatches = 0;
+            for pixel in 0..total_pixels {
+                let offset = pixel * 4;
+                if data[offset..offset + 4] != *color {
+                    mismatches += 1;
+                }
+            }
+            assert_eq!(
+                mismatches, 0,
+                "Round {round} ({color:?}): {mismatches}/{total_pixels} pixels wrong"
+            );
+        });
+    }
+}
+heap_tests!(test_sequential_color_cycle, sequential_color_cycle_test);
+
+// =============================================================================
+// Stress Tests (Phase 5)
+// =============================================================================
+
+/// Stress test: 100 sequential clear+readback cycles with different colors.
+fn stress_clear_100_test(heap_type: HeapType) {
+    let width = 64;
+    let height = 64;
+    let size = width * height * 4;
+
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+    let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+    let mut surface = create_surface(&buf, width, height, g2d_format_G2D_RGBA8888);
+
+    let start = Instant::now();
+
+    for i in 0..100u32 {
+        let color = [
+            (i * 37 % 256) as u8,
+            (i * 73 % 256) as u8,
+            (i * 131 % 256) as u8,
+            255u8,
+        ];
+
+        let result = g2d.clear(&mut surface, color);
+        assert!(
+            result.is_ok(),
+            "Iteration {i}: clear failed: {:?}",
+            result.err()
+        );
+
+        buf.read_with(|data| {
+            // Spot check several pixels
+            for pixel in [0, width * height / 2, width * height - 1] {
+                let offset = pixel * 4;
+                assert_eq!(
+                    &data[offset..offset + 4],
+                    &color,
+                    "Iteration {i}: mismatch at pixel {pixel}, expected {color:?}, got {:?}",
+                    &data[offset..offset + 4]
+                );
+            }
+        });
+    }
+
+    let elapsed = start.elapsed();
+    eprintln!(
+        "  100 clear+readback cycles in {elapsed:.2?} ({:.2?}/cycle)",
+        elapsed / 100
+    );
+}
+heap_tests!(test_stress_clear_100, stress_clear_100_test);
+
+/// Stress test: 100 blit+readback cycles.
+fn stress_blit_100_test(heap_type: HeapType) {
+    let width = 64;
+    let height = 64;
+    let size = width * height * 4;
+
+    let src_buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate src buffer");
+    let dst_buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate dst buffer");
+
+    let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+    g2d.set_bt709_colorspace()
+        .expect("Failed to set colorspace");
+
+    let src_surface = create_surface(&src_buf, width, height, g2d_format_G2D_RGBA8888);
+    let dst_surface = create_surface(&dst_buf, width, height, g2d_format_G2D_RGBA8888);
+
+    let start = Instant::now();
+
+    for i in 0..100u32 {
+        // Write a unique pattern each iteration
+        src_buf.write_with(|data| {
+            for pixel in 0..(width * height) {
+                let offset = pixel * 4;
+                data[offset] = ((pixel + i as usize) % 256) as u8;
+                data[offset + 1] = ((pixel * 3 + i as usize) % 256) as u8;
+                data[offset + 2] = ((pixel * 7 + i as usize) % 256) as u8;
+                data[offset + 3] = 255;
+            }
+        });
+
+        let result = g2d.blit(&src_surface, &dst_surface);
+        assert!(
+            result.is_ok(),
+            "Iteration {i}: blit failed: {:?}",
+            result.err()
+        );
+
+        // Verify first few pixels match
+        let src_snapshot = src_buf.read_with(|data| data[..16].to_vec());
+        dst_buf.read_with(|data| {
+            assert_eq!(
+                &data[..16],
+                &src_snapshot[..],
+                "Iteration {i}: first 4 pixels mismatch"
+            );
+        });
+    }
+
+    let elapsed = start.elapsed();
+    eprintln!(
+        "  100 blit+readback cycles in {elapsed:.2?} ({:.2?}/cycle)",
+        elapsed / 100
+    );
+}
+heap_tests!(test_stress_blit_100, stress_blit_100_test);
 
 // =============================================================================
 // Error Handling Tests

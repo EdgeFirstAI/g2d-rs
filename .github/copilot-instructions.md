@@ -43,7 +43,7 @@ Fix typo in README
 ```bash
 cargo build --workspace      # Build
 cargo test --workspace       # Test
-cargo +nightly fmt --all     # Format
+cargo fmt --all               # Format
 cargo clippy --workspace     # Lint
 ```
 

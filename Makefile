@@ -1,6 +1,6 @@
 # g2d-rs Makefile
 
-.PHONY: help format lint check test clean
+.PHONY: help format lint check test bench clean
 
 help:
 	@echo "Available targets:"
@@ -8,11 +8,12 @@ help:
 	@echo "  make lint      - Run clippy"
 	@echo "  make check     - Run cargo check"
 	@echo "  make test      - Run tests"
+	@echo "  make bench     - Run benchmarks"
 	@echo "  make clean     - Clean build artifacts"
 
 format:
 	@echo "Formatting Rust code..."
-	@cargo +nightly fmt --all 2>/dev/null || cargo fmt --all
+	@cargo fmt --all
 	@echo "✓ Formatting complete"
 
 lint:
@@ -29,6 +30,11 @@ test:
 	@echo "Running tests..."
 	@cargo test --workspace
 	@echo "✓ Tests passed"
+
+bench:
+	@echo "Running benchmarks..."
+	@cargo bench --workspace
+	@echo "✓ Benchmarks complete"
 
 clean:
 	@echo "Cleaning..."

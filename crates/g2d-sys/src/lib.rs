@@ -383,6 +383,11 @@ impl G2D {
         self.version
     }
 
+    /// Clear a surface to a solid color using the hardware `g2d_clear` operation.
+    ///
+    /// Works with both `g2d_alloc` and DMA-buf buffers. For DMA-buf buffers on
+    /// cached CMA heaps, ensure proper DRM PRIME attachment is in place so that
+    /// `DMA_BUF_IOCTL_SYNC` performs actual cache maintenance.
     pub fn clear(&self, dst: &mut G2DSurface, color: [u8; 4]) -> Result<()> {
         dst.clrcolor = i32::from_le_bytes(color);
         let ret = if self.version >= G2D_2_3_0 {

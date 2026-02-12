@@ -1,0 +1,195 @@
+# GitHub Actions workflow for on-demand benchmarking
+#
+# Trigger: Manual only (workflow_dispatch)
+# Generates criterion benchmarks on NXP i.MX 8M Plus hardware with
+# rich summary charts and historical trend tracking.
+#
+# Runner Notes:
+#   - ubuntu-22.04-arm: GitHub ARM64 runner (public repos)
+#   - nxp-imx8mp-latest: NXP i.MX 8M Plus EVK - test-only runner (NO toolchain)
+#
+# Action Versions (hash-pinned):
+# - actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 (v4)
+# - actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 (v4)
+# - actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 (v4)
+# - dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb38d33daa680b (1.75)
+# - Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 (v2.8.2)
+# - benchmark-action/github-action-benchmark@4bdcce38c94cec68da58d012ac24b7b1155efe8b (v1.20.7)
+name: Benchmark
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_VERSION: "1.75"
+
+jobs:
+  # ===========================================================================
+  # Phase 1: Build Benchmark Binaries (aarch64)
+  # ===========================================================================
+  build:
+    name: Build Benchmarks
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb38d33daa680b
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5  # v2.8.2
+        with:
+          shared-key: rust-aarch64
+          cache-on-failure: true
+
+      - name: Build benchmark binary
+        run: |
+          cargo bench --no-run 2>&1
+          mkdir -p benchmark-binaries
+          find target/release/deps/ -maxdepth 1 -name 'video_benchmark-*' \
+            -type f -executable ! -name '*.d' \
+            -exec cp {} benchmark-binaries/ \;
+          echo "Benchmark binaries:"
+          ls -la benchmark-binaries/
+
+      - name: Upload benchmark binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: benchmark-binaries
+          path: benchmark-binaries/
+          retention-days: 7
+
+  # ===========================================================================
+  # Phase 2: Run Benchmarks on NXP i.MX 8M Plus
+  # ===========================================================================
+  run-benchmarks:
+    name: Run on i.MX 8M Plus
+    needs: build
+    runs-on: nxp-imx8mp-latest
+    timeout-minutes: 60
+    steps:
+      - name: Clean workspace
+        run: |
+          rm -rf benchmark-binaries/ benchmark-results/ target/ 2>/dev/null || true
+
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Download benchmark binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: benchmark-binaries
+          path: benchmark-binaries/
+
+      - name: System info
+        run: |
+          echo "=== System ===" && uname -a
+          echo "=== CPU ===" && cat /proc/cpuinfo | grep -m1 "model name" || echo "N/A"
+          echo "=== Memory ===" && free -h | head -2
+          echo "=== G2D ===" && ls -la /dev/galcore 2>/dev/null || echo "Not found"
+          echo "=== libg2d ===" && ls -la /usr/lib/libg2d.so* 2>/dev/null || echo "Not found"
+
+      - name: Run benchmarks
+        run: |
+          chmod +x benchmark-binaries/*
+          mkdir -p benchmark-results
+
+          BENCH_BIN=$(ls benchmark-binaries/video_benchmark-* 2>/dev/null | head -1)
+          if [ -z "$BENCH_BIN" ]; then
+            echo "ERROR: No benchmark binary found"
+            ls -la benchmark-binaries/
+            exit 1
+          fi
+
+          echo "=== Running benchmarks on $(hostname) ==="
+          echo "Binary: $BENCH_BIN"
+
+          # Run with baseline save (generates Criterion JSON) and bencher output
+          "$BENCH_BIN" --bench --save-baseline github-ci \
+            --output-format bencher 2>&1 | tee benchmark-results/bencher-output.txt
+
+          # Package Criterion JSON data
+          if [ -d "target/criterion" ]; then
+            echo "Packaging Criterion JSON data..."
+            tar -czf benchmark-results/criterion-data.tar.gz -C target criterion
+          fi
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: benchmark-results-imx8mp
+          path: benchmark-results/
+          retention-days: 90
+
+  # ===========================================================================
+  # Phase 3: Process Results and Publish
+  # ===========================================================================
+  process-benchmarks:
+    name: Process Results
+    needs: run-benchmarks
+    runs-on: ubuntu-22.04-arm
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Download benchmark results
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: benchmark-results-imx8mp
+          path: benchmark-results/
+
+      - name: Process and generate summary
+        run: |
+          # Extract Criterion JSON data if available
+          if [ -f benchmark-results/criterion-data.tar.gz ]; then
+            echo "Extracting Criterion JSON data..."
+            tar -xzf benchmark-results/criterion-data.tar.gz
+          fi
+
+          python3 .github/scripts/benchmark_summary.py \
+            --criterion-dir criterion \
+            --bencher-file benchmark-results/bencher-output.txt \
+            --output benchmark-summary.md
+
+      - name: Write job summary
+        run: |
+          cat benchmark-summary.md >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "<details>" >> "$GITHUB_STEP_SUMMARY"
+          echo "<summary>Full Benchmark Output</summary>" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat benchmark-results/bencher-output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Store benchmark trend
+        uses: benchmark-action/github-action-benchmark@4bdcce38c94cec68da58d012ac24b7b1155efe8b  # v1.20.7
+        with:
+          name: G2D Video Pipeline Benchmarks
+          tool: 'cargo'
+          output-file-path: benchmark-results/bencher-output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          benchmark-data-dir-path: dev/bench
+          alert-threshold: '150%'
+          comment-on-alert: true
+
+      - name: Upload processed results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: benchmark-report
+          path: |
+            benchmark-summary.md
+          retention-days: 90

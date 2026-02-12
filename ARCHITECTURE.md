@@ -70,19 +70,14 @@ uses `RGBA8888` layout: `0xAABBGGRR` as an integer. The crate packs it using
 
 The G2D library provides two buffer allocation paths:
 
-- **`g2d_alloc()`** — GPU-managed contiguous memory. All G2D operations work
-  reliably with these buffers.
+- **`g2d_alloc()`** — GPU-managed contiguous memory.
 - **DMA-buf heap** (`/dev/dma_heap/`) — Linux kernel DMA-buf allocator. Physical
   addresses are obtained via a vendor-specific `DMA_BUF_IOCTL_PHYS` ioctl.
 
-**Important limitation:** `g2d_clear()` only works reliably with `g2d_alloc`
-buffers. When used with DMA-buf heap buffers, clear may return success but fail
-to write data (non-deterministic). `g2d_blit()` works correctly with both
-allocation methods.
-
-The `fill()` method provides a reliable alternative to `g2d_clear` for DMA-buf
-surfaces. It allocates a temporary `g2d_alloc` buffer, clears it with
-`g2d_clear`, then blits the result to the destination.
+G2D operations (`g2d_blit`, `g2d_clear`) work with both allocation methods.
+When using DMA-buf buffers on cached CMA heaps, the complete cache coherency
+protocol (DRM PRIME import + `DMA_BUF_IOCTL_SYNC`) must be followed for
+correct operation.
 
 ### CPU Cache Coherency
 

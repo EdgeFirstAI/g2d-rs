@@ -25,7 +25,9 @@ Other i.MX platforms with G2D support should work but are not currently tested.
 - Target must have `/dev/dri/renderD128` accessible for DRM PRIME import
   (required for cached heap cache coherency)
 
-## Cross-Compilation
+## Manual On-Target Testing
+
+### Cross-Compile
 
 ```bash
 cargo zigbuild --target aarch64-unknown-linux-gnu --tests
@@ -36,9 +38,7 @@ The test binary is located at:
 target/aarch64-unknown-linux-gnu/debug/deps/hardware_tests-<hash>
 ```
 
-## Running Tests
-
-Deploy and run on target:
+### Deploy and Run
 
 ```bash
 BINARY=$(find target/aarch64-unknown-linux-gnu/debug/deps -name 'hardware_tests-*' -executable | head -1)
@@ -48,7 +48,7 @@ ssh <target> "/tmp/hardware_tests --test-threads=1 --nocapture"
 
 **Important:** Use `--test-threads=1` to avoid concurrent G2D handle contention.
 
-### Running Specific Test Categories
+### Running Specific Tests
 
 ```bash
 # Run only uncached heap tests
@@ -57,20 +57,21 @@ ssh <target> "/tmp/hardware_tests --test-threads=1 --nocapture uncached"
 # Run only cached heap tests
 ssh <target> "/tmp/hardware_tests --test-threads=1 --nocapture cached"
 
-# Run only benchmarks
-ssh <target> "/tmp/hardware_tests --test-threads=1 --nocapture bench"
-
 # Run only stress tests
 ssh <target> "/tmp/hardware_tests --test-threads=1 --nocapture stress"
 
 # Run only correctness tests
 ssh <target> "/tmp/hardware_tests --test-threads=1 --nocapture double_write\|multi_read\|roundtrip\|color_cycle"
+
+# Run a single named test
+ssh <target> "/tmp/hardware_tests --test-threads=1 --nocapture test_g2d_clear_rgba_cached"
 ```
 
 ## Test Categories
 
-Tests that use DMA-buf buffers are run in both `_uncached` and `_cached` variants.
-Tests skip automatically when the required heap is not available.
+Tests that use DMA-buf buffers are run in both `_uncached` and `_cached` variants
+using the `heap_tests!` macro. Tests skip automatically when the required heap is
+not available.
 
 ### Initialization Tests
 - `test_g2d_open_close` — Verify G2D library can be loaded and handle opened
@@ -84,16 +85,12 @@ Tests skip automatically when the required heap is not available.
 - `test_g2d_physical_address_{uncached,cached}` — Verify physical address
   resolution via ioctl on each heap type
 
-### Clear Tests (g2d_alloc buffers)
-- `test_g2d_clear_rgba` — Clear with a single RGBA color
-- `test_g2d_clear_multiple_colors` — Clear with 6 different colors sequentially
-
-### Fill Tests (DMA-buf buffers, uncached + cached)
-- `test_g2d_fill_rgba_{uncached,cached}` — Fill a DMA-buf surface with a single
-  color via blit
-- `test_g2d_fill_multiple_colors_{uncached,cached}` — Fill same buffer with 6
+### Clear Tests (DMA-buf buffers, uncached + cached)
+- `test_g2d_clear_rgba_{uncached,cached}` — Clear a DMA-buf surface with a
+  single RGBA color
+- `test_g2d_clear_multiple_colors_{uncached,cached}` — Clear same buffer with 6
   colors sequentially
-- `test_g2d_fill_large_surface_{uncached,cached}` — Fill a 1920x1080 surface
+- `test_g2d_clear_large_surface_{uncached,cached}` — Clear a 1920x1080 surface
 
 ### Blit Tests (DMA-buf buffers, uncached + cached)
 - `test_g2d_blit_rgba_to_rgba_{uncached,cached}` — Blit between same-format
@@ -118,29 +115,123 @@ Tests skip automatically when the required heap is not available.
   colors sequentially, verifying every pixel after each fill.
 
 ### Stress Tests
-- `test_stress_fill_100_{uncached,cached}` — 100 sequential fill+readback cycles
-  with different colors.
+- `test_stress_clear_100_{uncached,cached}` — 100 sequential clear+readback
+  cycles with different colors.
 - `test_stress_blit_100_{uncached,cached}` — 100 sequential blit+readback cycles
   with unique patterns.
-
-### Benchmarks
-- `test_bench_fill_throughput_{uncached,cached}` — Fill throughput at 5
-  resolutions (64x64 through 1920x1080).
-- `test_bench_blit_throughput_{uncached,cached}` — Blit throughput at 5
-  resolutions.
-- `test_bench_sync_overhead_{uncached,cached}` — DMA_BUF_IOCTL_SYNC overhead
-  at 4 buffer sizes, read and write directions.
-- `test_bench_fill_readback_{uncached,cached}` — Combined fill+sync+readback
-  throughput at 3 resolutions.
 
 ### Pixel Format Tests
 - `test_g2d_format_conversion` — Verify RGBA, BGRA, ARGB, ABGR byte layouts
 - `test_g2d_format_invalid` — Verify graceful handling of invalid formats
 - `test_g2d_colorspace_configuration` — Verify colorspace setting on surfaces
 
+## Benchmarks
+
+Benchmarks use [Criterion](https://docs.rs/criterion) for statistically rigorous
+measurement of G2D video pipeline operations. They are separate from tests and
+run as a dedicated `[[bench]]` target.
+
+### Benchmark Groups
+
+- **convert** — Format conversion at same resolution (NV12/YUYV → RGBA)
+- **resize** — Scale + convert to 640x480 RGBA destination
+- **letterbox** — Aspect-preserving resize with gray border to 640x480 and 640x640
+
+Each benchmark is run on both uncached and cached DMA heaps across 6 source
+resolutions (640x480 through 3840x2160) and up to 3 source formats (NV12, YUYV, RGBA).
+
+### Manual On-Target Benchmarks
+
+#### Cross-Compile
+
+```bash
+cargo zigbuild --target aarch64-unknown-linux-gnu --benches
+```
+
+The benchmark binary is at:
+```
+target/aarch64-unknown-linux-gnu/release/deps/video_benchmark-<hash>
+```
+
+#### Deploy and Run
+
+```bash
+BINARY=$(find target/aarch64-unknown-linux-gnu/release/deps -name 'video_benchmark-*' -executable ! -name '*.d' | head -1)
+scp "$BINARY" <target>:/tmp/video_benchmark
+ssh <target> "/tmp/video_benchmark --bench"
+```
+
+#### Common Options
+
+```bash
+# Full benchmark run with statistical analysis
+./video_benchmark --bench
+
+# Machine-readable output (for CI)
+./video_benchmark --bench --output-format bencher
+
+# Run specific group only
+./video_benchmark --bench convert
+./video_benchmark --bench resize
+./video_benchmark --bench letterbox
+
+# Save baseline for comparison
+./video_benchmark --bench --save-baseline my-baseline
+```
+
+#### On Host (if G2D hardware available)
+
+```bash
+make bench
+# or
+cargo bench -p g2d-sys --bench video_benchmark
+```
+
+## CI Integration
+
+### Automated Tests (`test.yml`)
+
+Tests run automatically on every push to `main`/`develop` and on every pull
+request. The workflow has 4 jobs:
+
+1. **Build & Lint** (`ubuntu-22.04-arm`) — Formatting, clippy, docs, and
+   builds test binaries with coverage instrumentation
+2. **Hardware Test** (`nxp-imx8mp-latest`) — Downloads pre-built test binaries
+   and runs all tests with `--test-threads=1` on NXP i.MX 8M Plus EVK hardware
+3. **Process Coverage** (`ubuntu-22.04-arm`) — Merges profraw files from
+   hardware test run and generates LCOV coverage report
+4. **SonarCloud Analysis** (`ubuntu-22.04-arm`) — Uploads coverage and runs
+   static analysis
+
+Tests produce coverage artifacts (profraw, LCOV) and test result artifacts
+retained for 30 days.
+
+### On-Demand Benchmarks (`bench.yml`)
+
+Benchmarks are triggered manually via the **Benchmark** workflow
+(Actions → Benchmark → Run workflow). The workflow has 3 phases:
+
+1. **Build Benchmarks** (`ubuntu-22.04-arm`) — Builds criterion benchmark
+   binary in release mode
+2. **Run on i.MX 8M Plus** (`nxp-imx8mp-latest`) — Executes benchmarks with
+   `--save-baseline github-ci --output-format bencher`, producing both Criterion
+   JSON data (in `target/criterion/`) and bencher text output
+3. **Process Results** (`ubuntu-22.04-arm`) — Extracts Criterion JSON, generates
+   a markdown summary with tables and
+   [QuickChart.io](https://quickchart.io/) bar charts for the GitHub Actions
+   step summary, and stores trend data via
+   [github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark)
+
+Benchmark results are tracked over time with interactive charts published to
+GitHub Pages at `dev/bench/`. A 150% alert threshold triggers comments on
+regression.
+
+Benchmark result artifacts (including raw Criterion JSON) are retained for 90
+days.
+
 ## DMA Buffer Implementation
 
-Tests use a `DmaBuffer` struct with persistent mmap and proper
+Tests and benchmarks use a `DmaBuffer` struct with persistent mmap and proper
 `DMA_BUF_IOCTL_SYNC` protocol:
 
 1. Buffer is `mmap`'d once on creation (persistent mapping)
@@ -179,11 +270,3 @@ show 29% stale pixels on cached CMA; with the attachment, 0% stale pixels
 across all test categories and stress tests. See
 [ARCHITECTURE.md](ARCHITECTURE.md#cpu-cache-coherency) for the complete
 protocol.
-
-## Known Limitations
-
-### g2d_clear and DMA-buf
-`g2d_clear()` does not work reliably with DMA-buf heap buffers. Clear operations
-may return success but fail to write data. Use `fill()` (which internally uses
-`g2d_clear` on a temporary `g2d_alloc` buffer then blits to the destination)
-for DMA-buf surfaces.

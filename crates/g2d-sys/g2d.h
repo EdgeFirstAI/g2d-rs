@@ -1,6 +1,6 @@
 /*
  *  Copyright (C) 2013-2016 Freescale Semiconductor, Inc.
- *  Copyright 2017-2022 NXP
+ *  Copyright 2017-2025 NXP
  *
  *  Permission is hereby granted, free of charge, to any person obtaining
  *  a copy of this software and associated documentation files (the
@@ -17,7 +17,7 @@
  *  THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
  *  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
  *  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
- *  IN NO EVENT SHALL VIVANTE AND/OR ITS SUPPLIERS BE LIABLE FOR ANY
+ *  IN NO EVENT SHALL NXP AND/OR ITS SUPPLIERS BE LIABLE FOR ANY
  *  CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
  *  TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  *  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
@@ -45,6 +45,10 @@
  *	2020-01-08         Li Xianzhong      1.5            support BT_601 and BT_709
  *	2020-08-25         Petr Cach         1.6            support BGR888, support BT_601FR, BT_709FR
  *	2021-12-02         Li Xianzhong      2.0            Add g2d fence sync extension
+ *	2024-07-12         Guangliu Ding     2.2            support RGBA1010102 and GRAY8
+ *	2024-11-13         Guangliu Ding     2.3            support deinterlace/48bit address/dct api
+ *	2025-04-17         Erkai Ji          2.4            Add PXP version support
+ *	2025-08-25         Guangliu Ding     2.5            support dmabuf fd in src/dst buffer
 
 */
 
@@ -56,18 +60,18 @@ extern "C"  {
 #endif
 
 #define G2D_VERSION_MAJOR   2
-#define G2D_VERSION_MINOR   1
+#define G2D_VERSION_MINOR   5
 #define G2D_VERSION_PATCH   0
 
 enum g2d_format
 {
 //rgb formats
-     G2D_RGB565               = 0,    /* [0:4] Blue;  [5:10] Green; [11:15] Red                      */
+     G2D_RGB565               = 0,    /* [0:4] Red;   [5:10] Green; [11:15] Blue                     */
      G2D_RGBA8888             = 1,    /* [0:7] Red;   [8:15] Green; [16:23] Blue; [23:31] Alpha      */
      G2D_RGBX8888             = 2,    /* [0:7] Red;   [8:15] Green; [16:23] Blue; [23:31] don't care */
      G2D_BGRA8888             = 3,    /* [0:7] Blue;  [8:15] Green; [16:23] Red; [23:31] Alpha       */
      G2D_BGRX8888             = 4,    /* [0:7] Blue;  [8:15] Green; [16:23] Red; [23:31] don't care  */
-     G2D_BGR565               = 5,    /* [0:4] Red;   [5:10] Green; [11:15] Blue                     */
+     G2D_BGR565               = 5,    /* [0:4] Blue;  [5:10] Green; [11:15] Red                      */
 
      G2D_ARGB8888             = 6,    /* [0:7] Alpha; [8:15] Red;   [16:23] Green; [23:31] Blue      */
      G2D_ABGR8888             = 7,    /* [0:7] Alpha; [8:15] Blue;  [16:23] Green; [23:31] Red       */
@@ -80,6 +84,11 @@ enum g2d_format
      G2D_RGBX5551             = 13,    /* [0:4] Red;   [5:9] Green; [10:14] Blue; [15] don't care */
      G2D_BGRA5551             = 14,    /* [0:4] Blue;  [5:9] Green; [10:14] Red;  [15] Alpha       */
      G2D_BGRX5551             = 15,    /* [0:4] Blue;  [5:9] Green; [10:14] Red;  [15] don't care  */
+
+     G2D_RGBA1010102          = 16,    /* [0:9] Red;   [10:19] Green; [20:29] Blue; [30:31] Alpha     */
+
+     G2D_GRAY10               = 18,    /* [0:9] Gray;  [10:15] don't care                             */
+     G2D_GRAY8                = 19,    /* [0:7] Gray                                                  */
 
 //yuv formats
      G2D_NV12                 = 20,   /* 2 plane 420 format; plane 1: [0:7] Y ; plane 2: [0:7] U; [8:15] V */
@@ -154,8 +163,12 @@ enum g2d_cache_mode
 
 enum g2d_hardware_type
 {
-    G2D_HARDWARE_2D           = 0,//default type
-    G2D_HARDWARE_VG           = 1,
+    G2D_HARDWARE_2D           = 0,//GPU 2D
+    G2D_HARDWARE_VG           = 1,//GPU VG
+    G2D_HARDWARE_DPU_V1       = 2,//DPU V1
+    G2D_HARDWARE_DPU_V2       = 3,//DPU V2
+    G2D_HARDWARE_PXP_V1       = 4,//PXP V1
+    G2D_HARDWARE_PXP_V2       = 5,//PXP V2
 };
 
 enum g2d_status
@@ -169,7 +182,7 @@ enum g2d_status
 #include <sys/types.h>
 typedef off64_t g2d_phys_addr_t;
 #else
-typedef int     g2d_phys_addr_t;
+typedef unsigned long g2d_phys_addr_t;
 #endif
 
 struct g2d_surface
@@ -216,7 +229,7 @@ struct g2d_buf
 {
     void *buf_handle;
     void *buf_vaddr;
-    int  buf_paddr;
+    g2d_phys_addr_t buf_paddr;
     int  buf_size;
 };
 
@@ -238,9 +251,6 @@ int g2d_disable(void *handle, enum g2d_cap_mode cap);
 
 int g2d_cache_op(struct g2d_buf *buf, enum g2d_cache_mode op);
 struct g2d_buf *g2d_alloc(int size, int cacheable);
-struct g2d_buf *g2d_buf_from_fd(int fd);
-int g2d_buf_export_fd(struct g2d_buf *);
-struct g2d_buf *g2d_buf_from_virt_addr(void *vaddr, int size);
 int g2d_free(struct g2d_buf *buf);
 
 int g2d_flush(void *handle);

@@ -74,6 +74,23 @@ fn main() -> g2d_sys::Result<()> {
 }
 ```
 
+### Library Scope
+
+`g2d-sys` is a low-level FFI crate that maps `libg2d.so` to Rust through
+`dlopen`-based dynamic loading and ABI version detection. It does not provide
+safe Rust abstractions, cache management, or buffer lifecycle management.
+A high-level safe Rust API (`g2d` crate) is a future consideration.
+
+When using DMA-buf buffers, you are responsible for:
+
+- **Error handling** — all ioctl return values must be checked
+- **DMA-buf cache coherency** — including DRM PRIME attachment for cached heaps
+  (see [ARCHITECTURE.md](ARCHITECTURE.md#cpu-cache-coherency))
+- **Buffer allocation and lifetime management**
+
+See [`hardware_tests.rs`](crates/g2d-sys/tests/hardware_tests.rs) for a
+working example of correct DMA-buf usage with both cached and uncached heaps.
+
 ### Library Loading
 
 The bindings use dynamic loading via `libloading`. The library path must be specified when creating a `G2D` instance:

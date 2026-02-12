@@ -35,6 +35,15 @@ fn main() -> g2d_sys::Result<()> {
 | `clear` | Fill rectangle with solid color |
 | `enable/disable` | Configure colorspace (BT.601/BT.709) |
 
+## Library Scope
+
+This is a low-level FFI crate — it provides direct access to `libg2d.so`
+functions without safe Rust abstractions. When using DMA-buf buffers, you are
+responsible for correct cache management, including DRM PRIME attachment for
+cached heaps. See [ARCHITECTURE.md](../../ARCHITECTURE.md#cpu-cache-coherency)
+for the complete cache coherency protocol and
+[hardware_tests.rs](tests/hardware_tests.rs) for working examples.
+
 ## Requirements
 
 - **Rust 1.75+** (MSRV)

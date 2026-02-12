@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Reframed DMA-buf cache coherency documentation as standard Linux protocol
+  rather than platform-specific workaround
+- DRM PRIME import is now step 1 of the cache coherency protocol in
+  ARCHITECTURE.md, presented as a required part of correct DMA-buf usage
+
+### Added
+
+- Library scope sections in README.md and crates/g2d-sys/README.md clarifying
+  user responsibility for cache management and buffer lifecycle
+- TESTING.md documenting test infrastructure, DMA buffer implementation, and
+  on-target test execution
+
 ## [1.1.0] - 2026-02-12
 
 ### Changed

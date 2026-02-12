@@ -4,6 +4,7 @@
 [![Documentation](https://docs.rs/g2d-sys/badge.svg)](https://docs.rs/g2d-sys)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/EdgeFirstAI/g2d-rs/actions/workflows/test.yml/badge.svg)](https://github.com/EdgeFirstAI/g2d-rs/actions/workflows/test.yml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.75-blue.svg)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html)
 
 **Rust bindings for NXP i.MX G2D 2D graphics accelerator.**
 
@@ -17,6 +18,7 @@ This repository provides Rust bindings to `libg2d.so` for hardware-accelerated 2
 
 ## Requirements
 
+- **Rust 1.75+** (MSRV - Minimum Supported Rust Version)
 - NXP i.MX8/i.MX9 platform with G2D support
 - `libg2d.so.2` installed (typically at `/usr/lib/libg2d.so.2`)
 - Linux only (G2D is not available on other platforms)
@@ -87,12 +89,15 @@ let g2d = G2D::new(path)?;
 
 ## Platform Support
 
-| Platform | Support |
-|----------|---------|
-| NXP i.MX8 (all variants) | ✅ Full support |
-| NXP i.MX9 | ✅ Full support |
+| Platform | Status |
+|----------|--------|
+| NXP i.MX 8M Plus | ✅ Tested |
+| NXP i.MX 95 | ✅ Tested |
+| Other i.MX 8/9 variants | ⚠️ Should work (untested) |
 | Other Linux | ❌ No G2D hardware |
 | macOS/Windows | ❌ Linux only |
+
+**Note:** G2D is a portable library across i.MX platforms. Other i.MX variants should work but are not currently tested. Bug reports for untested platforms are welcome.
 
 ## ABI Compatibility
 

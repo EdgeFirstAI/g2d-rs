@@ -5,6 +5,7 @@ authors.workspace = true
 license.workspace = true
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 readme = "README.md"
 homepage.workspace = true
 repository.workspace = true
@@ -17,3 +18,8 @@ four-char-code = { workspace = true }
 libloading = { workspace = true }
 log = { workspace = true }
 nix = { workspace = true }
+
+[dev-dependencies]
+dma-heap = "0.4"
+env_logger = "0.11"
+libc = "0.2"

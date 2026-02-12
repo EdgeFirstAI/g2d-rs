@@ -40,6 +40,26 @@ pub enum Error {
     InvalidFormat(String),
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::IoError(e) => write!(f, "I/O error: {e}"),
+            Error::LibraryError(e) => write!(f, "Library error: {e}"),
+            Error::InvalidFormat(s) => write!(f, "Invalid format: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::IoError(e) => Some(e),
+            Error::LibraryError(e) => Some(e),
+            Error::InvalidFormat(_) => None,
+        }
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
         Error::IoError(err)

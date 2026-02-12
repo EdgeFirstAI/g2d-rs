@@ -1,6 +1,22 @@
-# Test Workflow
+# GitHub Actions workflow for testing and code quality
 #
-# Runs formatting, linting, and tests on push and PR.
+# Build Strategy:
+#   - All checks run on ubuntu-22.04-arm (g2d-rs only makes sense on ARM/i.MX)
+#   - Hardware tests on nxp-imx8mp-latest using pre-built binaries
+#   - MSRV: 1.75 (Ubuntu 22.04 default, also in NXP Yocto BSPs)
+#
+# Runner Notes:
+#   - ubuntu-22.04-arm: GitHub ARM64 runner (public repos)
+#   - nxp-imx8mp-latest: NXP i.MX 8M Plus EVK - test-only runner (NO toolchain)
+#
+# Action Versions (hash-pinned):
+# - actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 (v4)
+# - actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 (v4)
+# - actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 (v4)
+# - dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb38d33daa680b (1.75)
+# - Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 (v2.8.2)
+# - taiki-e/install-action@493d7f216ecab2af0602481ce809ab2c72836fa1 (v2.62.62)
+# - SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 (v6.0.0)
 
 name: Test
 
@@ -9,72 +25,277 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_VERSION: "1.75"
 
 jobs:
-  format:
-    name: Format Check
-    runs-on: ubuntu-latest
+  # ===========================================================================
+  # Build, Lint, and Prepare Test Binaries (aarch64)
+  # ===========================================================================
+  build:
+    name: Build & Lint
+    runs-on: ubuntu-22.04-arm
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb38d33daa680b
         with:
-          components: rustfmt
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5  # v2.8.2
+        with:
+          shared-key: rust-aarch64
+          cache-on-failure: true
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@493d7f216ecab2af0602481ce809ab2c72836fa1  # v2.62.62
+        with:
+          tool: cargo-llvm-cov@0.6.16,cargo-nextest
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  lint:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Run clippy
+      - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --workspace
-
-      - name: Run tests
-        run: cargo test --workspace
-
-  # Documentation build check
-  docs:
-    name: Documentation
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Build documentation
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+      - name: Build with coverage instrumentation
+        run: |
+          source <(cargo llvm-cov show-env --export-prefix)
+          cargo llvm-cov clean --workspace
+          cargo build --workspace --profile profiling
+
+      - name: Build test binaries (no-run)
+        run: |
+          source <(cargo llvm-cov show-env --export-prefix)
+          cargo nextest run --workspace --no-run --cargo-profile profiling
+          mkdir -p hardware-test-binaries
+          find target/llvm-cov-target/profiling/deps/ -maxdepth 1 -type f -executable \
+            ! -name "*.d" ! -name "*.rlib" ! -name "*.rmeta" ! -name "*.so" \
+            -exec cp {} hardware-test-binaries/ \; 2>/dev/null || true
+          echo "Test binaries:"
+          ls -la hardware-test-binaries/
+
+      - name: Upload hardware test artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: hardware-test-binaries
+          path: |
+            hardware-test-binaries/
+          retention-days: 7
+
+      - name: Upload coverage binaries (for profraw processing)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: coverage-binaries-aarch64
+          path: |
+            target/llvm-cov-target/profiling/deps/*
+          retention-days: 7
+
+  # ===========================================================================
+  # Hardware Test on NXP i.MX 8M Plus
+  # ===========================================================================
+  hardware-test:
+    name: Hardware Test (imx8mp)
+    needs: build
+    runs-on: nxp-imx8mp-latest
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+
+    steps:
+      - name: Clean workspace
+        run: |
+          rm -rf build/ target/ hardware-test-binaries/ 2>/dev/null || true
+          find . -name "*.gcda" -o -name "*.profraw" -delete 2>/dev/null || true
+
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Download aarch64 test artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: hardware-test-binaries
+          path: hardware-test-binaries/
+
+      - name: Debug environment info
+        run: |
+          echo "=== System Info ===" && uname -a
+          echo "=== G2D ===" && ls -la /dev/galcore 2>/dev/null || echo "Not found"
+          echo "=== libg2d ===" && ls -la /usr/lib/libg2d.so* 2>/dev/null || echo "Not found"
+          echo "=== Test binaries ===" && ls -la hardware-test-binaries/ 2>/dev/null || echo "Not found"
+
+      - name: Run Rust tests on hardware
+        env:
+          LLVM_PROFILE_FILE: ${{ github.workspace }}/build/profraw/rust-%p-%m.profraw
+        run: |
+          set -o pipefail
+          mkdir -p build/rust-test-results build/profraw
+          chmod +x hardware-test-binaries/* 2>/dev/null || true
+          TEST_FAILED=0
+          for test_bin in hardware-test-binaries/*; do
+            if [ -x "$test_bin" ] && [ -f "$test_bin" ]; then
+              # Skip .so files
+              if [[ "$test_bin" == *.so ]]; then
+                continue
+              fi
+              test_name=$(basename "$test_bin")
+              echo "=== Running $test_name ==="
+              if ! "$test_bin" --test-threads=1 2>&1 | tee "build/rust-test-results/${test_name}.txt"; then
+                echo "FAILED: $test_name"
+                TEST_FAILED=1
+              fi
+            fi
+          done
+          [ $TEST_FAILED -eq 0 ] || exit 1
+
+      - name: Upload coverage profraw
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: coverage-profraw-imx8mp
+          path: build/profraw/
+          retention-days: 7
+
+      - name: Upload test results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: test-results-imx8mp
+          path: build/rust-test-results/
+          retention-days: 30
+
+  # ===========================================================================
+  # Process Hardware Coverage (on aarch64 runner with toolchain)
+  # ===========================================================================
+  process-coverage:
+    name: Process Coverage
+    needs: [build, hardware-test]
+    runs-on: ubuntu-22.04-arm
+    if: always() && needs.hardware-test.result == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb38d33daa680b
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: llvm-tools-preview
+
+      - name: Download coverage binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: coverage-binaries-aarch64
+          path: target/llvm-cov-target/profiling/deps/
+
+      - name: Download profraw from hardware test
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: coverage-profraw-imx8mp
+          path: build/profraw/
+
+      - name: Process coverage
+        run: |
+          TOOLCHAIN_ROOT=$(rustc --print sysroot)
+          LLVM_PROFDATA=$(find "$TOOLCHAIN_ROOT" -name "llvm-profdata" -type f | head -1)
+          LLVM_COV=$(find "$TOOLCHAIN_ROOT" -name "llvm-cov" -type f | head -1)
+
+          PROFRAW_COUNT=$(find build/profraw/ -name "*.profraw" 2>/dev/null | wc -l)
+          echo "Found $PROFRAW_COUNT profraw files"
+
+          if [ "$PROFRAW_COUNT" -eq 0 ]; then
+            echo "No profraw files, creating empty coverage"
+            mkdir -p target
+            echo "" > target/coverage_rust.lcov
+            exit 0
+          fi
+
+          # Merge profraw files
+          "$LLVM_PROFDATA" merge -sparse build/profraw/*.profraw -o build/merged.profdata
+
+          # Collect object files
+          FIRST_OBJ=""
+          OBJECT_ARGS=""
+          for obj in target/llvm-cov-target/profiling/deps/*; do
+            if [ -f "$obj" ] && file "$obj" | grep -q "ELF"; then
+              if [ -z "$FIRST_OBJ" ]; then
+                FIRST_OBJ="$obj"
+              else
+                OBJECT_ARGS="$OBJECT_ARGS --object=$obj"
+              fi
+            fi
+          done
+
+          if [ -z "$FIRST_OBJ" ]; then
+            echo "No ELF binaries found, creating empty coverage"
+            mkdir -p target
+            echo "" > target/coverage_rust.lcov
+            exit 0
+          fi
+
+          mkdir -p target
+          "$LLVM_COV" export --format=lcov --instr-profile=build/merged.profdata \
+            --ignore-filename-regex='(\.cargo|/rustc/|/target/)' \
+            $FIRST_OBJ $OBJECT_ARGS > target/coverage_rust.lcov 2>/dev/null || echo "" > target/coverage_rust.lcov
+
+          echo "=== Coverage summary ==="
+          echo "Source files in coverage: $(grep -c '^SF:' target/coverage_rust.lcov || echo 0)"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: coverage-imx8mp
+          path: target/coverage_rust.lcov
+          retention-days: 30
+
+  # ===========================================================================
+  # SonarCloud Analysis
+  # ===========================================================================
+  sonarcloud:
+    name: SonarCloud Analysis
+    needs: [build, process-coverage]
+    runs-on: ubuntu-22.04-arm
+    if: always() && needs.build.result == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: coverage-imx8mp
+          path: coverage/
+        continue-on-error: true
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602  # v6.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.projectKey=EdgeFirstAI_g2d-rs
+            -Dsonar.organization=edgefirstai
+            -Dsonar.sources=crates/
+            -Dsonar.tests=crates/
+            -Dsonar.test.inclusions=**/tests/**,**/*_test.rs
+            -Dsonar.coverage.exclusions=**/tests/**,**/ffi.rs
+            -Dsonar.rust.lcov.reportPaths=coverage/coverage_rust.lcov

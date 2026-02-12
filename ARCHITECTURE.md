@@ -14,7 +14,7 @@ let lib = libloading::Library::new("/usr/lib/libg2d.so.2")?;
 
 This approach allows:
 - Compilation on systems without G2D installed
-- Runtime detection of G2D availability
+- Runtime detection of G2D availability and version
 - Graceful fallback when G2D is not present
 
 ## ABI Compatibility

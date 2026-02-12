@@ -21,6 +21,26 @@ use g2d_sys::{
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::ptr;
 
+// DMA-buf synchronization ioctl constants (linux/dma-buf.h)
+const DMA_BUF_BASE: u8 = b'b';
+const DMA_BUF_IOCTL_SYNC: u8 = 0;
+
+const DMA_BUF_SYNC_READ: u64 = 1 << 0;
+const DMA_BUF_SYNC_WRITE: u64 = 1 << 1;
+const DMA_BUF_SYNC_START: u64 = 0 << 2;
+const DMA_BUF_SYNC_END: u64 = 1 << 2;
+
+#[repr(C)]
+struct DmaBufSync {
+    flags: u64,
+}
+
+// _IOW('b', 0, struct dma_buf_sync) = direction=1, size=8, type='b', nr=0
+const DMA_BUF_IOCTL_SYNC_CMD: libc::c_ulong = (1 << 30)
+    | ((std::mem::size_of::<DmaBufSync>() as libc::c_ulong) << 16)
+    | ((DMA_BUF_BASE as libc::c_ulong) << 8)
+    | DMA_BUF_IOCTL_SYNC as libc::c_ulong;
+
 /// Helper to allocate a DMA buffer and get its physical address
 struct DmaBuffer {
     #[allow(dead_code)] // Kept for RAII - fd must outlive the mmap
@@ -70,12 +90,59 @@ impl DmaBuffer {
         self.phys.address()
     }
 
-    fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size) }
+    /// Begin CPU access for reading. Must be paired with `end_cpu_read()`.
+    fn begin_cpu_read(&self) {
+        let sync = DmaBufSync {
+            flags: DMA_BUF_SYNC_READ | DMA_BUF_SYNC_START,
+        };
+        unsafe {
+            libc::ioctl(self.fd.as_raw_fd(), DMA_BUF_IOCTL_SYNC_CMD, &sync);
+        }
     }
 
-    fn as_slice(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.ptr, self.size) }
+    /// End CPU access for reading.
+    fn end_cpu_read(&self) {
+        let sync = DmaBufSync {
+            flags: DMA_BUF_SYNC_READ | DMA_BUF_SYNC_END,
+        };
+        unsafe {
+            libc::ioctl(self.fd.as_raw_fd(), DMA_BUF_IOCTL_SYNC_CMD, &sync);
+        }
+    }
+
+    /// Begin CPU access for writing. Must be paired with `end_cpu_write()`.
+    fn begin_cpu_write(&self) {
+        let sync = DmaBufSync {
+            flags: DMA_BUF_SYNC_WRITE | DMA_BUF_SYNC_START,
+        };
+        unsafe {
+            libc::ioctl(self.fd.as_raw_fd(), DMA_BUF_IOCTL_SYNC_CMD, &sync);
+        }
+    }
+
+    /// End CPU access for writing.
+    fn end_cpu_write(&self) {
+        let sync = DmaBufSync {
+            flags: DMA_BUF_SYNC_WRITE | DMA_BUF_SYNC_END,
+        };
+        unsafe {
+            libc::ioctl(self.fd.as_raw_fd(), DMA_BUF_IOCTL_SYNC_CMD, &sync);
+        }
+    }
+
+    /// Write data to the buffer with proper DMA-buf sync.
+    fn write_with<F: FnOnce(&mut [u8])>(&mut self, f: F) {
+        self.begin_cpu_write();
+        f(unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size) });
+        self.end_cpu_write();
+    }
+
+    /// Read data from the buffer with proper DMA-buf sync.
+    fn read_with<F: FnOnce(&[u8]) -> T, T>(&self, f: F) -> T {
+        self.begin_cpu_read();
+        let result = f(unsafe { std::slice::from_raw_parts(self.ptr, self.size) });
+        self.end_cpu_read();
+        result
     }
 }
 
@@ -218,7 +285,7 @@ fn test_g2d_clear_rgba() {
     let mut buf = DmaBuffer::new(size).expect("Failed to allocate DMA buffer");
 
     // Initialize to zeros
-    buf.as_mut_slice().fill(0);
+    buf.write_with(|data| data.fill(0));
 
     let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
     let mut surface = create_surface(&buf, width, height, g2d_format_G2D_RGBA8888);
@@ -229,14 +296,15 @@ fn test_g2d_clear_rgba() {
     assert!(result.is_ok(), "G2D clear failed: {:?}", result.err());
 
     // Verify the buffer was filled with red
-    let data = buf.as_slice();
-    for i in 0..10 {
-        let offset = i * 4;
-        assert_eq!(data[offset], 255, "Red channel mismatch at pixel {i}");
-        assert_eq!(data[offset + 1], 0, "Green channel mismatch at pixel {i}");
-        assert_eq!(data[offset + 2], 0, "Blue channel mismatch at pixel {i}");
-        assert_eq!(data[offset + 3], 255, "Alpha channel mismatch at pixel {i}");
-    }
+    buf.read_with(|data| {
+        for i in 0..10 {
+            let offset = i * 4;
+            assert_eq!(data[offset], 255, "Red channel mismatch at pixel {i}");
+            assert_eq!(data[offset + 1], 0, "Green channel mismatch at pixel {i}");
+            assert_eq!(data[offset + 2], 0, "Blue channel mismatch at pixel {i}");
+            assert_eq!(data[offset + 3], 255, "Alpha channel mismatch at pixel {i}");
+        }
+    });
 
     println!("G2D clear RGBA test passed");
 }
@@ -272,11 +340,12 @@ fn test_g2d_clear_multiple_colors() {
         );
 
         // Spot check first pixel
-        let data = buf.as_slice();
-        assert_eq!(data[0], color[0], "Color mismatch for {color:?}");
-        assert_eq!(data[1], color[1], "Color mismatch for {color:?}");
-        assert_eq!(data[2], color[2], "Color mismatch for {color:?}");
-        assert_eq!(data[3], color[3], "Color mismatch for {color:?}");
+        buf.read_with(|data| {
+            assert_eq!(data[0], color[0], "Color mismatch for {color:?}");
+            assert_eq!(data[1], color[1], "Color mismatch for {color:?}");
+            assert_eq!(data[2], color[2], "Color mismatch for {color:?}");
+            assert_eq!(data[3], color[3], "Color mismatch for {color:?}");
+        });
     }
 
     println!("G2D clear multiple colors test passed");
@@ -298,12 +367,14 @@ fn test_g2d_blit_rgba_to_rgba() {
     let mut dst_buf = DmaBuffer::new(size).expect("Failed to allocate dst buffer");
 
     // Fill source with a pattern
-    for (i, byte) in src_buf.as_mut_slice().iter_mut().enumerate() {
-        *byte = (i % 256) as u8;
-    }
+    src_buf.write_with(|data| {
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = (i % 256) as u8;
+        }
+    });
 
     // Clear destination
-    dst_buf.as_mut_slice().fill(0);
+    dst_buf.write_with(|data| data.fill(0));
 
     let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
     g2d.set_bt709_colorspace()
@@ -316,8 +387,10 @@ fn test_g2d_blit_rgba_to_rgba() {
     assert!(result.is_ok(), "G2D blit failed: {:?}", result.err());
 
     // Verify destination matches source
-    let src_data = src_buf.as_slice();
-    let dst_data = dst_buf.as_slice();
+    src_buf.begin_cpu_read();
+    dst_buf.begin_cpu_read();
+    let src_data = unsafe { std::slice::from_raw_parts(src_buf.ptr, src_buf.size) };
+    let dst_data = unsafe { std::slice::from_raw_parts(dst_buf.ptr, dst_buf.size) };
 
     for i in 0..100 {
         assert_eq!(
@@ -326,6 +399,8 @@ fn test_g2d_blit_rgba_to_rgba() {
             src_data[i], dst_data[i]
         );
     }
+    dst_buf.end_cpu_read();
+    src_buf.end_cpu_read();
 
     println!("G2D blit RGBA to RGBA test passed");
 }
@@ -346,18 +421,19 @@ fn test_g2d_blit_with_scaling() {
     let mut dst_buf = DmaBuffer::new(dst_size).expect("Failed to allocate dst buffer");
 
     // Fill source with a gradient pattern
-    for y in 0..src_height {
-        for x in 0..src_width {
-            let offset = (y * src_width + x) * 4;
-            let slice = src_buf.as_mut_slice();
-            slice[offset] = (x * 2) as u8; // R
-            slice[offset + 1] = (y * 2) as u8; // G
-            slice[offset + 2] = 128; // B
-            slice[offset + 3] = 255; // A
+    src_buf.write_with(|slice| {
+        for y in 0..src_height {
+            for x in 0..src_width {
+                let offset = (y * src_width + x) * 4;
+                slice[offset] = (x * 2) as u8; // R
+                slice[offset + 1] = (y * 2) as u8; // G
+                slice[offset + 2] = 128; // B
+                slice[offset + 3] = 255; // A
+            }
         }
-    }
+    });
 
-    dst_buf.as_mut_slice().fill(0);
+    dst_buf.write_with(|data| data.fill(0));
 
     let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
     g2d.set_bt709_colorspace()
@@ -374,12 +450,13 @@ fn test_g2d_blit_with_scaling() {
     );
 
     // Verify destination is not all zeros (scaling happened)
-    let dst_data = dst_buf.as_slice();
-    let non_zero_count = dst_data.iter().filter(|&&b| b != 0).count();
-    assert!(
-        non_zero_count > dst_size / 2,
-        "Destination buffer appears empty after scaling"
-    );
+    dst_buf.read_with(|dst_data| {
+        let non_zero_count = dst_data.iter().filter(|&&b| b != 0).count();
+        assert!(
+            non_zero_count > dst_size / 2,
+            "Destination buffer appears empty after scaling"
+        );
+    });
 
     println!("G2D blit with scaling test passed");
 }
@@ -397,16 +474,17 @@ fn test_g2d_blit_rgba_to_rgb() {
     let mut dst_buf = DmaBuffer::new(dst_size).expect("Failed to allocate dst buffer");
 
     // Fill source with known values (red)
-    for i in 0..(width * height) {
-        let offset = i * 4;
-        let slice = src_buf.as_mut_slice();
-        slice[offset] = 255; // R
-        slice[offset + 1] = 0; // G
-        slice[offset + 2] = 0; // B
-        slice[offset + 3] = 255; // A
-    }
+    src_buf.write_with(|slice| {
+        for i in 0..(width * height) {
+            let offset = i * 4;
+            slice[offset] = 255; // R
+            slice[offset + 1] = 0; // G
+            slice[offset + 2] = 0; // B
+            slice[offset + 3] = 255; // A
+        }
+    });
 
-    dst_buf.as_mut_slice().fill(0);
+    dst_buf.write_with(|data| data.fill(0));
 
     let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
     g2d.set_bt709_colorspace()
@@ -423,21 +501,22 @@ fn test_g2d_blit_rgba_to_rgb() {
     );
 
     // Verify destination has red values
-    let dst_data = dst_buf.as_slice();
-    for i in 0..10 {
-        let offset = i * 3;
-        assert_eq!(dst_data[offset], 255, "Red channel mismatch at pixel {i}");
-        assert_eq!(
-            dst_data[offset + 1],
-            0,
-            "Green channel mismatch at pixel {i}"
-        );
-        assert_eq!(
-            dst_data[offset + 2],
-            0,
-            "Blue channel mismatch at pixel {i}"
-        );
-    }
+    dst_buf.read_with(|dst_data| {
+        for i in 0..10 {
+            let offset = i * 3;
+            assert_eq!(dst_data[offset], 255, "Red channel mismatch at pixel {i}");
+            assert_eq!(
+                dst_data[offset + 1],
+                0,
+                "Green channel mismatch at pixel {i}"
+            );
+            assert_eq!(
+                dst_data[offset + 2],
+                0,
+                "Blue channel mismatch at pixel {i}"
+            );
+        }
+    });
 
     println!("G2D blit RGBA to RGB test passed");
 }
@@ -459,16 +538,17 @@ fn test_g2d_blit_yuyv_to_rgba() {
     let mut dst_buf = DmaBuffer::new(dst_size).expect("Failed to allocate dst buffer");
 
     // Fill with YUYV pattern (gray: Y=128, U=128, V=128)
-    for i in 0..(src_size / 4) {
-        let offset = i * 4;
-        let slice = src_buf.as_mut_slice();
-        slice[offset] = 128; // Y0
-        slice[offset + 1] = 128; // U
-        slice[offset + 2] = 128; // Y1
-        slice[offset + 3] = 128; // V
-    }
+    src_buf.write_with(|slice| {
+        for i in 0..(src_size / 4) {
+            let offset = i * 4;
+            slice[offset] = 128; // Y0
+            slice[offset + 1] = 128; // U
+            slice[offset + 2] = 128; // Y1
+            slice[offset + 3] = 128; // V
+        }
+    });
 
-    dst_buf.as_mut_slice().fill(0);
+    dst_buf.write_with(|data| data.fill(0));
 
     let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
     g2d.set_bt709_colorspace()
@@ -485,12 +565,13 @@ fn test_g2d_blit_yuyv_to_rgba() {
     );
 
     // Verify output is not empty (gray should convert to approximately gray in RGB)
-    let dst_data = dst_buf.as_slice();
-    let non_zero = dst_data.iter().filter(|&&b| b != 0).count();
-    assert!(
-        non_zero > dst_size / 4,
-        "Destination appears empty after YUV conversion"
-    );
+    dst_buf.read_with(|dst_data| {
+        let non_zero = dst_data.iter().filter(|&&b| b != 0).count();
+        assert!(
+            non_zero > dst_size / 4,
+            "Destination appears empty after YUV conversion"
+        );
+    });
 
     println!("G2D blit YUYV to RGBA test passed");
 }
@@ -508,14 +589,14 @@ fn test_g2d_blit_nv12_to_rgba() {
     let mut src_buf = DmaBuffer::new(src_size).expect("Failed to allocate src buffer");
     let mut dst_buf = DmaBuffer::new(dst_size).expect("Failed to allocate dst buffer");
 
-    // Fill Y plane with 128 (gray)
+    // Fill Y plane with 128 (gray) and UV plane with 128 (neutral chroma)
     let y_size = width * height;
-    src_buf.as_mut_slice()[..y_size].fill(128);
+    src_buf.write_with(|data| {
+        data[..y_size].fill(128);
+        data[y_size..].fill(128);
+    });
 
-    // Fill UV plane with 128 (neutral chroma)
-    src_buf.as_mut_slice()[y_size..].fill(128);
-
-    dst_buf.as_mut_slice().fill(0);
+    dst_buf.write_with(|data| data.fill(0));
 
     let mut g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
     g2d.set_bt709_colorspace()
@@ -532,12 +613,13 @@ fn test_g2d_blit_nv12_to_rgba() {
     );
 
     // Verify output is not empty
-    let dst_data = dst_buf.as_slice();
-    let non_zero = dst_data.iter().filter(|&&b| b != 0).count();
-    assert!(
-        non_zero > dst_size / 4,
-        "Destination appears empty after NV12 conversion"
-    );
+    dst_buf.read_with(|dst_data| {
+        let non_zero = dst_data.iter().filter(|&&b| b != 0).count();
+        assert!(
+            non_zero > dst_size / 4,
+            "Destination appears empty after NV12 conversion"
+        );
+    });
 
     println!("G2D blit NV12 to RGBA test passed");
 }

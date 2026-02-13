@@ -18,7 +18,12 @@
 
 use dma_heap::{Heap, HeapKind};
 use g2d_sys::{
-    g2d_format_G2D_RGB888, g2d_format_G2D_RGBA8888, g2d_format_G2D_YUYV,
+    g2d_format, g2d_format_G2D_ABGR8888, g2d_format_G2D_ARGB8888, g2d_format_G2D_BGR565,
+    g2d_format_G2D_BGR888, g2d_format_G2D_BGRA8888, g2d_format_G2D_BGRX8888,
+    g2d_format_G2D_I420, g2d_format_G2D_NV12, g2d_format_G2D_NV16, g2d_format_G2D_NV21,
+    g2d_format_G2D_NV61, g2d_format_G2D_RGB565, g2d_format_G2D_RGB888, g2d_format_G2D_RGBA8888,
+    g2d_format_G2D_RGBX8888, g2d_format_G2D_UYVY, g2d_format_G2D_VYUY, g2d_format_G2D_XBGR8888,
+    g2d_format_G2D_XRGB8888, g2d_format_G2D_YUYV, g2d_format_G2D_YV12, g2d_format_G2D_YVYU,
     g2d_rotation_G2D_ROTATION_0, G2DFormat, G2DPhysical, G2DSurface, G2D, NV12, RGB, RGBA, YUYV,
 };
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -619,6 +624,302 @@ fn clear_large_surface_test(heap_type: HeapType) {
     });
 }
 heap_tests!(test_g2d_clear_large_surface, clear_large_surface_test);
+
+// =============================================================================
+// Clear Format Tests — g2d_clear with various destination formats
+// =============================================================================
+//
+// The clrcolor field is always in RGBA8888 format. The GPU converts it to the
+// destination surface format. These tests verify g2d_clear works correctly
+// with each supported RGB destination format.
+
+/// Verify that g2d_clear rejects formats not supported as clear destinations.
+///
+/// As of G2D v6.4.11 (i.MX 8M Plus), g2d_clear only supports 2-byte (565)
+/// and 4-byte (8888) RGB formats. 3-byte RGB and all YUV formats are rejected.
+///
+/// **NOTE FOR FUTURE DEVELOPERS:** If this test starts FAILING, it means
+/// g2d_clear now SUCCEEDS on a format that previously returned an error.
+/// This is GOOD NEWS — the GPU driver has gained new clear capabilities!
+/// Update the test: move the newly-supported format from this list into
+/// `clear_all_rgb_formats_test` (or add a new byte-level verification test),
+/// and remove it from the unsupported list here.
+fn clear_unsupported_formats_test(heap_type: HeapType) {
+    let width = 64;
+    let height = 64;
+
+    // Allocate a buffer large enough for any format (4 bpp * 64 * 64 = 16 KiB)
+    let size = width * height * 4;
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+    let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+
+    // Formats that g2d_clear does NOT support as of G2D v6.4.11.
+    // Each entry: (format constant, human-readable name).
+    //
+    // Note: YUYV and UYVY ARE supported (tested in clear_all_formats_test).
+    // Only YVYU/VYUY are rejected among packed YUV 4:2:2 formats.
+    let unsupported: &[(g2d_format, &str)] = &[
+        // 3-byte RGB — hardware only supports 2-byte and 4-byte clear targets
+        (g2d_format_G2D_RGB888, "RGB888"),
+        (g2d_format_G2D_BGR888, "BGR888"),
+        // Packed YUV 4:2:2 (only YVYU/VYUY; YUYV/UYVY are supported)
+        (g2d_format_G2D_YVYU, "YVYU"),
+        (g2d_format_G2D_VYUY, "VYUY"),
+        // Semi-planar YUV 4:2:0
+        (g2d_format_G2D_NV12, "NV12"),
+        (g2d_format_G2D_NV21, "NV21"),
+        // Planar YUV 4:2:0
+        (g2d_format_G2D_I420, "I420"),
+        (g2d_format_G2D_YV12, "YV12"),
+        // Semi-planar YUV 4:2:2
+        (g2d_format_G2D_NV16, "NV16"),
+        (g2d_format_G2D_NV61, "NV61"),
+    ];
+
+    let mut newly_supported = Vec::new();
+    for &(format, name) in unsupported {
+        let mut surface = create_surface(&buf, width, height, format);
+        let result = g2d.clear(&mut surface, [255, 0, 0, 255]);
+        if result.is_ok() {
+            eprintln!("  {name}: UNEXPECTEDLY SUCCEEDED — driver now supports this format!");
+            newly_supported.push(name);
+        } else {
+            eprintln!("  {name}: correctly rejected");
+        }
+    }
+    assert!(
+        newly_supported.is_empty(),
+        "g2d_clear now SUCCEEDS for previously unsupported formats: {newly_supported:?}. \
+         This is GOOD NEWS — the GPU driver has gained new clear capabilities! \
+         Move these formats from clear_unsupported_formats_test into \
+         clear_all_rgb_formats_test (or add dedicated byte-verification tests)."
+    );
+}
+heap_tests!(test_g2d_clear_unsupported_formats, clear_unsupported_formats_test);
+
+fn clear_bgra8888_test(heap_type: HeapType) {
+    let width = 64;
+    let height = 64;
+    let bpp = 4;
+    let size = width * height * bpp;
+
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+    buf.write_with(|data| data.fill(0));
+
+    let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+    let mut surface = create_surface(&buf, width, height, g2d_format_G2D_BGRA8888);
+
+    // Clear with red (clrcolor is RGBA8888)
+    let color = [255u8, 0, 0, 255];
+    let result = g2d.clear(&mut surface, color);
+    assert!(
+        result.is_ok(),
+        "G2D clear BGRA8888 failed: {:?}",
+        result.err()
+    );
+
+    // BGRA8888 memory layout: [B, G, R, A] per pixel
+    buf.read_with(|data| {
+        for i in 0..10 {
+            let off = i * bpp;
+            assert_eq!(data[off], 0, "B mismatch at pixel {i}");
+            assert_eq!(data[off + 1], 0, "G mismatch at pixel {i}");
+            assert_eq!(data[off + 2], 255, "R mismatch at pixel {i}");
+            assert_eq!(data[off + 3], 255, "A mismatch at pixel {i}");
+        }
+    });
+}
+heap_tests!(test_g2d_clear_bgra8888, clear_bgra8888_test);
+
+fn clear_argb8888_test(heap_type: HeapType) {
+    let width = 64;
+    let height = 64;
+    let bpp = 4;
+    let size = width * height * bpp;
+
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+    buf.write_with(|data| data.fill(0));
+
+    let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+    let mut surface = create_surface(&buf, width, height, g2d_format_G2D_ARGB8888);
+
+    // Clear with red (clrcolor is RGBA8888)
+    let color = [255u8, 0, 0, 255];
+    let result = g2d.clear(&mut surface, color);
+    assert!(
+        result.is_ok(),
+        "G2D clear ARGB8888 failed: {:?}",
+        result.err()
+    );
+
+    // ARGB8888 memory layout: [A, R, G, B] per pixel
+    buf.read_with(|data| {
+        for i in 0..10 {
+            let off = i * bpp;
+            assert_eq!(data[off], 255, "A mismatch at pixel {i}");
+            assert_eq!(data[off + 1], 255, "R mismatch at pixel {i}");
+            assert_eq!(data[off + 2], 0, "G mismatch at pixel {i}");
+            assert_eq!(data[off + 3], 0, "B mismatch at pixel {i}");
+        }
+    });
+}
+heap_tests!(test_g2d_clear_argb8888, clear_argb8888_test);
+
+fn clear_rgb565_test(heap_type: HeapType) {
+    let width = 64;
+    let height = 64;
+    let bpp = 2;
+    let size = width * height * bpp;
+
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+    buf.write_with(|data| data.fill(0));
+
+    let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+    let mut surface = create_surface(&buf, width, height, g2d_format_G2D_RGB565);
+
+    // RGB565 LE layout: R(15:11) G(10:5) B(4:0)
+    // Pure red   → R=31 G=0 B=0  → 0xF800
+    // Pure green → R=0  G=63 B=0 → 0x07E0
+    // Pure blue  → R=0  G=0 B=31 → 0x001F
+    // White      → all-ones       → 0xFFFF
+    let test_cases: [([u8; 4], u16, &str); 4] = [
+        ([255, 0, 0, 255], 0xF800, "red"),
+        ([0, 255, 0, 255], 0x07E0, "green"),
+        ([0, 0, 255, 255], 0x001F, "blue"),
+        ([255, 255, 255, 255], 0xFFFF, "white"),
+    ];
+
+    for (color, expected, name) in &test_cases {
+        let result = g2d.clear(&mut surface, *color);
+        assert!(result.is_ok(), "G2D clear RGB565 {name} failed: {:?}", result.err());
+
+        buf.read_with(|data| {
+            for i in 0..10 {
+                let off = i * bpp;
+                let pixel = u16::from_le_bytes([data[off], data[off + 1]]);
+                assert_eq!(
+                    pixel, *expected,
+                    "RGB565 {name} mismatch at pixel {i}: got 0x{pixel:04X}, expected 0x{expected:04X}"
+                );
+            }
+        });
+    }
+}
+heap_tests!(test_g2d_clear_rgb565, clear_rgb565_test);
+
+/// Bytes per pixel for a g2d_format, or None for multi-plane/unsupported formats.
+#[allow(non_upper_case_globals)]
+fn format_bpp(format: g2d_format) -> Option<usize> {
+    match format {
+        g2d_format_G2D_RGB565 | g2d_format_G2D_BGR565 => Some(2),
+        g2d_format_G2D_YUYV | g2d_format_G2D_UYVY => Some(2),
+        g2d_format_G2D_RGB888 | g2d_format_G2D_BGR888 => Some(3),
+        g2d_format_G2D_RGBA8888
+        | g2d_format_G2D_RGBX8888
+        | g2d_format_G2D_BGRA8888
+        | g2d_format_G2D_BGRX8888
+        | g2d_format_G2D_ARGB8888
+        | g2d_format_G2D_ABGR8888
+        | g2d_format_G2D_XRGB8888
+        | g2d_format_G2D_XBGR8888 => Some(4),
+        _ => None,
+    }
+}
+
+/// Format name for diagnostic output.
+#[allow(non_upper_case_globals)]
+fn format_name(format: g2d_format) -> &'static str {
+    match format {
+        g2d_format_G2D_RGB565 => "RGB565",
+        g2d_format_G2D_RGBA8888 => "RGBA8888",
+        g2d_format_G2D_RGBX8888 => "RGBX8888",
+        g2d_format_G2D_BGRA8888 => "BGRA8888",
+        g2d_format_G2D_BGRX8888 => "BGRX8888",
+        g2d_format_G2D_BGR565 => "BGR565",
+        g2d_format_G2D_ARGB8888 => "ARGB8888",
+        g2d_format_G2D_ABGR8888 => "ABGR8888",
+        g2d_format_G2D_XRGB8888 => "XRGB8888",
+        g2d_format_G2D_XBGR8888 => "XBGR8888",
+        g2d_format_G2D_RGB888 => "RGB888",
+        g2d_format_G2D_BGR888 => "BGR888",
+        g2d_format_G2D_YUYV => "YUYV",
+        g2d_format_G2D_UYVY => "UYVY",
+        _ => "unknown",
+    }
+}
+
+/// Comprehensive clear test across all supported destination formats.
+///
+/// For each format: clear with two different colors and verify the buffer
+/// contents change between clears (not stale). This validates that g2d_clear
+/// correctly handles the format without requiring exact byte-order knowledge
+/// for every variant.
+///
+/// Unsupported formats are tested separately in `clear_unsupported_formats_test`.
+fn clear_all_formats_test(heap_type: HeapType) {
+    let width = 64;
+    let height = 64;
+
+    let formats = [
+        // 16-bit RGB
+        g2d_format_G2D_RGB565,
+        g2d_format_G2D_BGR565,
+        // 32-bit RGB variants
+        g2d_format_G2D_RGBA8888,
+        g2d_format_G2D_RGBX8888,
+        g2d_format_G2D_BGRA8888,
+        g2d_format_G2D_BGRX8888,
+        g2d_format_G2D_ARGB8888,
+        g2d_format_G2D_ABGR8888,
+        g2d_format_G2D_XRGB8888,
+        g2d_format_G2D_XBGR8888,
+        // Packed YUV 4:2:2 (YUYV/UYVY supported; YVYU/VYUY are not)
+        g2d_format_G2D_YUYV,
+        g2d_format_G2D_UYVY,
+    ];
+
+    let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+
+    for format in formats {
+        let name = format_name(format);
+        let bpp = format_bpp(format).expect("unknown bpp");
+        let size = width * height * bpp;
+
+        let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+        buf.write_with(|data| data.fill(0));
+
+        let mut surface = create_surface(&buf, width, height, format);
+
+        // Clear with red
+        let red = [255u8, 0, 0, 255];
+        let result = g2d.clear(&mut surface, red);
+        assert!(result.is_ok(), "{name}: clear with red failed: {:?}", result.err());
+
+        let red_snapshot = buf.read_with(|data| data[..bpp * 10].to_vec());
+
+        // Buffer must not be all zeros after clear
+        assert!(
+            red_snapshot.iter().any(|&b| b != 0),
+            "{name}: buffer still all zeros after red clear"
+        );
+
+        // Clear with blue
+        let blue = [0u8, 0, 255, 255];
+        let result = g2d.clear(&mut surface, blue);
+        assert!(result.is_ok(), "{name}: clear with blue failed: {:?}", result.err());
+
+        let blue_snapshot = buf.read_with(|data| data[..bpp * 10].to_vec());
+
+        // Blue clear must produce different bytes than red clear
+        assert_ne!(
+            red_snapshot, blue_snapshot,
+            "{name}: buffer unchanged between red and blue clears (stale data?)"
+        );
+
+        eprintln!("  {name} ({bpp} bpp): OK");
+    }
+}
+heap_tests!(test_g2d_clear_all_formats, clear_all_formats_test);
 
 // =============================================================================
 // Blit Operation Tests

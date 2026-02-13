@@ -1,6 +1,19 @@
-# Release Workflow
+# Release Workflow — Trusted Publishing to crates.io
 #
-# Publishes to crates.io when a version tag is pushed.
+# Publishes to crates.io when a version tag is pushed, using OIDC trusted
+# publishing (no stored secrets). Tests are NOT re-run here — test.yml
+# already runs on every push/PR.
+#
+# Manual crates.io setup required (one-time):
+#   crates.io → Crate Settings → Trusted Publishing → Add Publisher:
+#     Owner: EdgeFirstAI, Repo: g2d-rs, Workflow: release.yml,
+#     Environment: crates-io
+#
+# Action Versions (hash-pinned):
+# - actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 (v4)
+# - dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb38d33daa680b (stable)
+# - rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec (v1.0.3)
+# - softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe (v2.4.2)
 
 name: Release
 
@@ -9,46 +22,67 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+rc[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.2.0)'
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ===========================================================================
+  # Publish to crates.io (Trusted Publishing via OIDC)
+  # ===========================================================================
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    environment: crates-io
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/g2d-sys
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb38d33daa680b
+        with:
+          toolchain: stable
 
       - name: Verify version matches tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GIT_REF: ${{ github.ref }}
         run: |
-          TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          CARGO_VERSION=$(grep -A10 '^\[workspace.package\]' Cargo.toml | grep 'version = ' | sed 's/.*version = "\(.*\)"/\1/')
+          TAG_VERSION=${GIT_REF#refs/tags/v}
+          if [ -n "$INPUT_TAG" ]; then
+            TAG_VERSION=${INPUT_TAG#v}
+          fi
+          CARGO_VERSION=$(grep -A10 '^\[workspace.package\]' Cargo.toml | grep '^version = ' | sed 's/.*version = "\(.*\)"/\1/')
           if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
             echo "Error: Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
             exit 1
           fi
           echo "Version verified: $TAG_VERSION"
 
-      - name: Build
-        run: cargo build --workspace --release
-
-      - name: Run tests
-        run: cargo test --workspace --release
+      - name: Authenticate to crates.io (Trusted Publishing)
+        uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec  # v1.0.3
+        id: auth
 
       - name: Publish g2d-sys
-        run: cargo publish -p g2d-sys
+        run: cargo publish -p g2d-sys --no-verify
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
+  # ===========================================================================
+  # Create GitHub Release
+  # ===========================================================================
   github-release:
     name: Create GitHub Release
     needs: publish
@@ -57,19 +91,30 @@ jobs:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Extract changelog
         id: changelog
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GIT_REF: ${{ github.ref }}
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          # Extract changelog section for this version
-          awk "/## \[$VERSION\]/,/## \[/" CHANGELOG.md | head -n -1 > release_notes.md
+          VERSION=${GIT_REF#refs/tags/v}
+          if [ -n "$INPUT_TAG" ]; then
+            VERSION=${INPUT_TAG#v}
+          fi
+          # Extract section between this version header and the next version header
+          awk "/^## \\[$VERSION\\]/{found=1; next} /^## \\[/{if(found) exit} found" \
+            CHANGELOG.md > release_notes.md
           echo "Release notes:"
           cat release_notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe  # v2.4.2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           body_path: release_notes.md
           generate_release_notes: false
+          prerelease: ${{ contains(inputs.tag || github.ref, 'rc') }}

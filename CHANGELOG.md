@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-02-12
+
 ### Added
 
 - Criterion benchmarks for video pipeline operations (convert, resize,
@@ -23,9 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TESTING.md documenting test infrastructure, DMA buffer implementation,
   on-target test execution, manual benchmark execution, and CI integration
   for both tests and benchmarks
+- ARCHITECTURE.md documenting ABI compatibility handling
+- GitHub Actions workflows for CI/CD
+- SBOM generation and license compliance checking
 
 ### Changed
 
+- Moved to standalone repository (previously part of EdgeFirst HAL)
+- Changed license from MIT to Apache-2.0 for consistency
+- Updated to use workspace version inheritance
+- Added comprehensive documentation
 - Benchmarks separated from tests into proper `[[bench]]` criterion targets
   with `criterion = { version = "0.5", default-features = false }`
 - Reframed DMA-buf cache coherency documentation as standard Linux protocol
@@ -34,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ARCHITECTURE.md, presented as a required part of correct DMA-buf usage
 - All tests now use DMA-buf exclusively (no more `g2d_alloc` test buffers)
 - Clear tests are now parameterized by heap type (`_uncached` / `_cached`)
+- Release workflow uses OIDC trusted publishing instead of stored token
 
 ### Removed
 
@@ -44,21 +54,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `G2DAllocBuffer` test infrastructure and `create_g2d_alloc_surface()` helper
 - "Known Limitations" section from TESTING.md (g2d_clear/DMA-buf limitation
   was a cache coherency symptom, not a fundamental limitation)
-
-## [1.1.0] - 2026-02-12
-
-### Changed
-
-- Moved to standalone repository (previously part of EdgeFirst HAL)
-- Changed license from MIT to Apache-2.0 for consistency
-- Updated to use workspace version inheritance
-- Added comprehensive documentation
-
-### Added
-
-- ARCHITECTURE.md documenting ABI compatibility handling
-- GitHub Actions workflows for CI/CD
-- SBOM generation and license compliance checking
 
 ## [1.0.1] - 2025-11-15
 

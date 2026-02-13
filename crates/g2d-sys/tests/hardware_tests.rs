@@ -19,12 +19,12 @@
 use dma_heap::{Heap, HeapKind};
 use g2d_sys::{
     g2d_format, g2d_format_G2D_ABGR8888, g2d_format_G2D_ARGB8888, g2d_format_G2D_BGR565,
-    g2d_format_G2D_BGR888, g2d_format_G2D_BGRA8888, g2d_format_G2D_BGRX8888,
-    g2d_format_G2D_I420, g2d_format_G2D_NV12, g2d_format_G2D_NV16, g2d_format_G2D_NV21,
-    g2d_format_G2D_NV61, g2d_format_G2D_RGB565, g2d_format_G2D_RGB888, g2d_format_G2D_RGBA8888,
-    g2d_format_G2D_RGBX8888, g2d_format_G2D_UYVY, g2d_format_G2D_VYUY, g2d_format_G2D_XBGR8888,
-    g2d_format_G2D_XRGB8888, g2d_format_G2D_YUYV, g2d_format_G2D_YV12, g2d_format_G2D_YVYU,
-    g2d_rotation_G2D_ROTATION_0, G2DFormat, G2DPhysical, G2DSurface, G2D, NV12, RGB, RGBA, YUYV,
+    g2d_format_G2D_BGR888, g2d_format_G2D_BGRA8888, g2d_format_G2D_BGRX8888, g2d_format_G2D_I420,
+    g2d_format_G2D_NV12, g2d_format_G2D_NV16, g2d_format_G2D_NV21, g2d_format_G2D_NV61,
+    g2d_format_G2D_RGB565, g2d_format_G2D_RGB888, g2d_format_G2D_RGBA8888, g2d_format_G2D_RGBX8888,
+    g2d_format_G2D_UYVY, g2d_format_G2D_VYUY, g2d_format_G2D_XBGR8888, g2d_format_G2D_XRGB8888,
+    g2d_format_G2D_YUYV, g2d_format_G2D_YV12, g2d_format_G2D_YVYU, g2d_rotation_G2D_ROTATION_0,
+    G2DFormat, G2DPhysical, G2DSurface, G2D, NV12, RGB, RGBA, YUYV,
 };
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr;
@@ -539,6 +539,7 @@ fn clear_rgba_test(heap_type: HeapType) {
     let color = [255u8, 0, 0, 255];
     let result = g2d.clear(&mut surface, color);
     assert!(result.is_ok(), "G2D clear failed: {:?}", result.err());
+    g2d.finish().unwrap();
 
     buf.read_with(|data| {
         for i in 0..10 {
@@ -577,6 +578,7 @@ fn clear_multiple_colors_test(heap_type: HeapType) {
             "Clear with color {color:?} failed: {:?}",
             result.err()
         );
+        g2d.finish().unwrap();
 
         buf.read_with(|data| {
             for pixel in [0, 10, 100, width * height - 1] {
@@ -604,6 +606,7 @@ fn clear_large_surface_test(heap_type: HeapType) {
     let color = [0u8, 128, 255, 255]; // Blue-ish
     let result = g2d.clear(&mut surface, color);
     assert!(result.is_ok(), "G2D clear 1080p failed: {:?}", result.err());
+    g2d.finish().unwrap();
 
     buf.read_with(|data| {
         let pixels_to_check = [
@@ -695,7 +698,10 @@ fn clear_unsupported_formats_test(heap_type: HeapType) {
          clear_all_rgb_formats_test (or add dedicated byte-verification tests)."
     );
 }
-heap_tests!(test_g2d_clear_unsupported_formats, clear_unsupported_formats_test);
+heap_tests!(
+    test_g2d_clear_unsupported_formats,
+    clear_unsupported_formats_test
+);
 
 fn clear_bgra8888_test(heap_type: HeapType) {
     let width = 64;
@@ -717,6 +723,7 @@ fn clear_bgra8888_test(heap_type: HeapType) {
         "G2D clear BGRA8888 failed: {:?}",
         result.err()
     );
+    g2d.finish().unwrap();
 
     // BGRA8888 memory layout: [B, G, R, A] per pixel
     buf.read_with(|data| {
@@ -751,6 +758,7 @@ fn clear_argb8888_test(heap_type: HeapType) {
         "G2D clear ARGB8888 failed: {:?}",
         result.err()
     );
+    g2d.finish().unwrap();
 
     // ARGB8888 memory layout: [A, R, G, B] per pixel
     buf.read_with(|data| {
@@ -791,7 +799,12 @@ fn clear_rgb565_test(heap_type: HeapType) {
 
     for (color, expected, name) in &test_cases {
         let result = g2d.clear(&mut surface, *color);
-        assert!(result.is_ok(), "G2D clear RGB565 {name} failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "G2D clear RGB565 {name} failed: {:?}",
+            result.err()
+        );
+        g2d.finish().unwrap();
 
         buf.read_with(|data| {
             for i in 0..10 {
@@ -893,7 +906,12 @@ fn clear_all_formats_test(heap_type: HeapType) {
         // Clear with red
         let red = [255u8, 0, 0, 255];
         let result = g2d.clear(&mut surface, red);
-        assert!(result.is_ok(), "{name}: clear with red failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "{name}: clear with red failed: {:?}",
+            result.err()
+        );
+        g2d.finish().unwrap();
 
         let red_snapshot = buf.read_with(|data| data[..bpp * 10].to_vec());
 
@@ -906,7 +924,12 @@ fn clear_all_formats_test(heap_type: HeapType) {
         // Clear with blue
         let blue = [0u8, 0, 255, 255];
         let result = g2d.clear(&mut surface, blue);
-        assert!(result.is_ok(), "{name}: clear with blue failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "{name}: clear with blue failed: {:?}",
+            result.err()
+        );
+        g2d.finish().unwrap();
 
         let blue_snapshot = buf.read_with(|data| data[..bpp * 10].to_vec());
 
@@ -920,6 +943,167 @@ fn clear_all_formats_test(heap_type: HeapType) {
     }
 }
 heap_tests!(test_g2d_clear_all_formats, clear_all_formats_test);
+
+// =============================================================================
+// Partial Clear Tests — sub-region clearing for letterbox
+// =============================================================================
+
+/// Test that g2d_clear respects the left/top/right/bottom region of interest.
+///
+/// Clears only the top and bottom bars of an RGBA surface (simulating
+/// letterbox borders) and verifies that the content area is untouched.
+fn clear_partial_region_test(heap_type: HeapType) {
+    let width = 128;
+    let height = 128;
+    let bpp = 4;
+    let size = width * height * bpp;
+
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+
+    // Fill entire buffer with a known pattern (green)
+    let green = [0u8, 255, 0, 255];
+    buf.write_with(|data| {
+        for chunk in data.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&green);
+        }
+    });
+
+    let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+
+    // Clear only the top 32 rows with red
+    let red = [255u8, 0, 0, 255];
+    let mut top_surface = create_surface(&buf, width, height, g2d_format_G2D_RGBA8888);
+    top_surface.left = 0;
+    top_surface.top = 0;
+    top_surface.right = width as i32;
+    top_surface.bottom = 32;
+    g2d.clear(&mut top_surface, red).unwrap();
+
+    // Clear only the bottom 32 rows with blue
+    let blue = [0u8, 0, 255, 255];
+    let mut bottom_surface = create_surface(&buf, width, height, g2d_format_G2D_RGBA8888);
+    bottom_surface.left = 0;
+    bottom_surface.top = 96;
+    bottom_surface.right = width as i32;
+    bottom_surface.bottom = 128;
+    g2d.clear(&mut bottom_surface, blue).unwrap();
+
+    // Single finish for both clears
+    g2d.finish().unwrap();
+
+    buf.read_with(|data| {
+        // Top bar (rows 0-31): should be red
+        for row in 0..32 {
+            let offset = row * width * bpp;
+            assert_eq!(
+                &data[offset..offset + 4],
+                &red,
+                "Top bar pixel at row {row} should be red"
+            );
+        }
+
+        // Content area (rows 32-95): should still be green (untouched)
+        for row in 32..96 {
+            let offset = row * width * bpp;
+            assert_eq!(
+                &data[offset..offset + 4],
+                &green,
+                "Content area pixel at row {row} should be green (untouched)"
+            );
+        }
+
+        // Bottom bar (rows 96-127): should be blue
+        for row in 96..128 {
+            let offset = row * width * bpp;
+            assert_eq!(
+                &data[offset..offset + 4],
+                &blue,
+                "Bottom bar pixel at row {row} should be blue"
+            );
+        }
+    });
+}
+heap_tests!(test_g2d_clear_partial_region, clear_partial_region_test);
+
+/// Test partial clear with left/right vertical bars (portrait letterbox).
+fn clear_partial_left_right_test(heap_type: HeapType) {
+    let width = 128;
+    let height = 64;
+    let bpp = 4;
+    let size = width * height * bpp;
+
+    let buf = DmaBuffer::new(heap_type, size).expect("Failed to allocate DMA buffer");
+
+    // Fill with green
+    let green = [0u8, 255, 0, 255];
+    buf.write_with(|data| {
+        for chunk in data.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&green);
+        }
+    });
+
+    let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+    let gray = [114u8, 114, 114, 255];
+
+    // Clear left 16 columns
+    let mut left_surface = create_surface(&buf, width, height, g2d_format_G2D_RGBA8888);
+    left_surface.left = 0;
+    left_surface.top = 0;
+    left_surface.right = 16;
+    left_surface.bottom = height as i32;
+    g2d.clear(&mut left_surface, gray).unwrap();
+
+    // Clear right 16 columns
+    let mut right_surface = create_surface(&buf, width, height, g2d_format_G2D_RGBA8888);
+    right_surface.left = 112;
+    right_surface.top = 0;
+    right_surface.right = 128;
+    right_surface.bottom = height as i32;
+    g2d.clear(&mut right_surface, gray).unwrap();
+
+    g2d.finish().unwrap();
+
+    buf.read_with(|data| {
+        for row in 0..height {
+            let row_offset = row * width * bpp;
+
+            // Left bar (cols 0-15): gray
+            assert_eq!(
+                &data[row_offset..row_offset + 4],
+                &gray,
+                "Left bar at row {row} col 0 should be gray"
+            );
+
+            // Content (col 16): green
+            let mid_offset = row_offset + 16 * bpp;
+            assert_eq!(
+                &data[mid_offset..mid_offset + 4],
+                &green,
+                "Content at row {row} col 16 should be green"
+            );
+
+            // Content (col 111): green
+            let mid_offset = row_offset + 111 * bpp;
+            assert_eq!(
+                &data[mid_offset..mid_offset + 4],
+                &green,
+                "Content at row {row} col 111 should be green"
+            );
+
+            // Right bar (col 112): gray
+            let right_offset = row_offset + 112 * bpp;
+            assert_eq!(
+                &data[right_offset..right_offset + 4],
+                &gray,
+                "Right bar at row {row} col 112 should be gray"
+            );
+        }
+    });
+}
+heap_tests!(
+    test_g2d_clear_partial_left_right,
+    clear_partial_left_right_test
+);
 
 // =============================================================================
 // Blit Operation Tests
@@ -949,6 +1133,7 @@ fn blit_rgba_to_rgba_test(heap_type: HeapType) {
 
     let result = g2d.blit(&src_surface, &dst_surface);
     assert!(result.is_ok(), "G2D blit failed: {:?}", result.err());
+    g2d.finish().unwrap();
 
     let src_snapshot = src_buf.read_with(|data| data[..100].to_vec());
     dst_buf.read_with(|data| {
@@ -1001,6 +1186,7 @@ fn blit_with_scaling_test(heap_type: HeapType) {
         "G2D blit with scaling failed: {:?}",
         result.err()
     );
+    g2d.finish().unwrap();
 
     dst_buf.read_with(|dst_data| {
         let non_zero_count = dst_data.iter().filter(|&&b| b != 0).count();
@@ -1045,6 +1231,7 @@ fn blit_rgba_to_rgb_test(heap_type: HeapType) {
         "G2D RGBA to RGB blit failed: {:?}",
         result.err()
     );
+    g2d.finish().unwrap();
 
     dst_buf.read_with(|dst_data| {
         for i in 0..10 {
@@ -1102,6 +1289,7 @@ fn blit_yuyv_to_rgba_test(heap_type: HeapType) {
         "G2D YUYV to RGBA blit failed: {:?}",
         result.err()
     );
+    g2d.finish().unwrap();
 
     dst_buf.read_with(|dst_data| {
         let non_zero = dst_data.iter().filter(|&&b| b != 0).count();
@@ -1142,6 +1330,7 @@ fn blit_nv12_to_rgba_test(heap_type: HeapType) {
         "G2D NV12 to RGBA blit failed: {:?}",
         result.err()
     );
+    g2d.finish().unwrap();
 
     dst_buf.read_with(|dst_data| {
         let non_zero = dst_data.iter().filter(|&&b| b != 0).count();
@@ -1183,6 +1372,7 @@ fn double_write_overwrite_test(heap_type: HeapType) {
         "Clear with color A failed: {:?}",
         result.err()
     );
+    g2d.finish().unwrap();
 
     // Step 2: CPU reads — should see color A
     buf.read_with(|data| {
@@ -1204,6 +1394,7 @@ fn double_write_overwrite_test(heap_type: HeapType) {
         "Clear with color B failed: {:?}",
         result.err()
     );
+    g2d.finish().unwrap();
 
     // Step 4: CPU reads — MUST see color B, not stale color A
     buf.read_with(|data| {
@@ -1236,6 +1427,7 @@ fn multi_read_consistency_test(heap_type: HeapType) {
     let color = [0u8, 255, 0, 255]; // Green
     let result = g2d.clear(&mut surface, color);
     assert!(result.is_ok(), "Clear failed: {:?}", result.err());
+    g2d.finish().unwrap();
 
     // Read 5 times — all must return the same data
     for read_num in 0..5 {
@@ -1288,6 +1480,7 @@ fn cpu_gpu_roundtrip_test(heap_type: HeapType) {
 
     let result = g2d.blit(&src_surface, &dst_surface);
     assert!(result.is_ok(), "Blit failed: {:?}", result.err());
+    g2d.finish().unwrap();
 
     // CPU reads destination — should match the pattern written to source
     let src_snapshot = src_buf.read_with(|data| data.to_vec());
@@ -1343,6 +1536,7 @@ fn sequential_color_cycle_test(heap_type: HeapType) {
             "Round {round}: clear with {color:?} failed: {:?}",
             result.err()
         );
+        g2d.finish().unwrap();
 
         // Verify ALL pixels
         buf.read_with(|data| {
@@ -1393,6 +1587,7 @@ fn stress_clear_100_test(heap_type: HeapType) {
             "Iteration {i}: clear failed: {:?}",
             result.err()
         );
+        g2d.finish().unwrap();
 
         buf.read_with(|data| {
             // Spot check several pixels
@@ -1452,6 +1647,7 @@ fn stress_blit_100_test(heap_type: HeapType) {
             "Iteration {i}: blit failed: {:?}",
             result.err()
         );
+        g2d.finish().unwrap();
 
         // Verify first few pixels match
         let src_snapshot = src_buf.read_with(|data| data[..16].to_vec());

@@ -244,7 +244,7 @@ checksum = "42da99970737c0150e3c5cd1cdc510735a2511739f5c3aa3c6bfc9f31441488d"
 
 [[package]]
 name = "g2d-sys"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "criterion",
  "dma-heap",

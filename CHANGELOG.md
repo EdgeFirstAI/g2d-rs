@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-02-14
+
+### Changed
+
+- **Breaking:** `clear()` and `blit()` no longer call `g2d_finish()` internally.
+  Callers must now call `finish()` explicitly after queuing operations. This
+  enables batching multiple operations (e.g., clear + blit) with a single
+  GPU synchronization barrier, which is the correct usage pattern for the
+  G2D hardware.
+
+### Added
+
+- `finish()` method to explicitly wait for all queued G2D operations to complete.
+- `flush()` method to submit queued operations for asynchronous GPU execution
+  without waiting. Useful for overlapping GPU work with CPU work in pipelines
+  where the result is not needed immediately.
+- Partial clear tests (`test_g2d_clear_partial_region`, `test_g2d_clear_partial_left_right`)
+  verifying sub-region clearing via the surface left/top/right/bottom fields.
+- Partial clear benchmarks (`bench_partial_clear`) comparing G2D sub-region
+  clear vs CPU memset for letterbox bar configurations (top+bottom, left+right)
+  at realistic sizes (640×640 with 140px and 32px bars).
+- Comprehensive `g2d_clear` format tests across all 12 supported destination
+  formats (RGB565, BGR565, RGBA8888, RGBX8888, BGRA8888, BGRX8888, ARGB8888,
+  ABGR8888, XRGB8888, XBGR8888, YUYV, UYVY) with byte-level verification for
+  BGRA8888, ARGB8888, and RGB565, plus stale-data detection for all formats.
+- Expect-failure tests for unsupported `g2d_clear` destinations (RGB888, BGR888,
+  YVYU, VYUY, NV12, NV21, I420, YV12, NV16, NV61) that produce actionable
+  guidance when a driver update adds new format support.
+
 ## [1.1.0] - 2026-02-12
 
 ### Added

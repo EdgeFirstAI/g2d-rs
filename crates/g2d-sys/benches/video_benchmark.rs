@@ -107,6 +107,7 @@ fn bench_convert(c: &mut Criterion) {
                     |b, _| {
                         b.iter(|| {
                             g2d.blit(&src_surface, &dst_surface).expect("blit failed");
+                            g2d.finish().expect("finish failed");
                             black_box(&dst_buf);
                         });
                     },
@@ -187,6 +188,7 @@ fn bench_resize(c: &mut Criterion) {
                     |b, _| {
                         b.iter(|| {
                             g2d.blit(&src_surface, &dst_surface).expect("blit failed");
+                            g2d.finish().expect("finish failed");
                             black_box(&dst_buf);
                         });
                     },
@@ -290,6 +292,7 @@ fn bench_letterbox(c: &mut Criterion) {
                             b.iter(|| {
                                 g2d.clear(&mut dst_clear, gray).expect("clear failed");
                                 g2d.blit(&src_surface, &dst_blit).expect("blit failed");
+                                g2d.finish().expect("finish failed");
                                 black_box(&dst_buf);
                             });
                         },
@@ -302,5 +305,155 @@ fn bench_letterbox(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_convert, bench_resize, bench_letterbox);
+// =============================================================================
+// Partial Clear Benchmarks — G2D sub-region clear vs CPU memset for letterbox
+// =============================================================================
+
+/// Compare G2D partial clear vs CPU fill for letterbox-style bar clearing.
+///
+/// Simulates the clear phase of a letterbox resize pipeline where only the
+/// border bars (top/bottom or left/right) need to be filled with a solid color.
+/// Tests at the realistic 1920×1080 → 640×640 ratio (~44% border area with
+/// 140px top and bottom bars).
+fn bench_partial_clear(c: &mut Criterion) {
+    if !g2d_available() {
+        eprintln!("G2D not available, skipping partial clear benchmarks");
+        return;
+    }
+
+    let mut group = c.benchmark_group("partial_clear");
+    group.sample_size(200);
+
+    let gray = [114u8, 114, 114, 255];
+
+    // Letterbox configurations: (dst_w, dst_h, bar_size, orientation)
+    // 1920×1080 → 640×640: content 640×360, bars 140px top + 140px bottom
+    struct LetterboxConfig {
+        name: &'static str,
+        dst_w: usize,
+        dst_h: usize,
+        bars: Vec<(i32, i32, i32, i32)>, // (left, top, right, bottom) for each bar
+    }
+
+    let configs = [
+        LetterboxConfig {
+            name: "640x640/top+bottom/140px",
+            dst_w: 640,
+            dst_h: 640,
+            bars: vec![
+                (0, 0, 640, 140),   // top bar
+                (0, 500, 640, 640), // bottom bar
+            ],
+        },
+        LetterboxConfig {
+            name: "640x640/left+right/140px",
+            dst_w: 640,
+            dst_h: 640,
+            bars: vec![
+                (0, 0, 140, 640),   // left bar
+                (500, 0, 640, 640), // right bar
+            ],
+        },
+        LetterboxConfig {
+            name: "640x640/top+bottom/32px",
+            dst_w: 640,
+            dst_h: 640,
+            bars: vec![
+                (0, 0, 640, 32),    // top bar (small)
+                (0, 608, 640, 640), // bottom bar (small)
+            ],
+        },
+    ];
+
+    for config in &configs {
+        let bpp = 4usize;
+        let dst_size = config.dst_w * config.dst_h * bpp;
+
+        // CPU partial fill: write only the bar regions via mmap
+        {
+            let buf = match DmaBuffer::new(HeapType::Cached, dst_size) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("Skipping CPU {}: alloc failed: {e}", config.name);
+                    continue;
+                }
+            };
+
+            let bars = config.bars.clone();
+            let w = config.dst_w;
+
+            group.bench_function(BenchmarkId::new("cpu", config.name), |b| {
+                b.iter(|| {
+                    buf.write_with(|data| {
+                        for &(left, top, right, bottom) in &bars {
+                            for row in top..bottom {
+                                let row_start = (row as usize * w + left as usize) * bpp;
+                                let row_end = (row as usize * w + right as usize) * bpp;
+                                for chunk in data[row_start..row_end].chunks_exact_mut(4) {
+                                    chunk.copy_from_slice(&gray);
+                                }
+                            }
+                        }
+                    });
+                    black_box(&buf);
+                });
+            });
+        }
+
+        // G2D partial clear: clear each bar sub-region separately
+        for heap_type in [HeapType::Uncached, HeapType::Cached] {
+            if !heap_type.is_available() {
+                continue;
+            }
+
+            let buf = match DmaBuffer::new(heap_type, dst_size) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!(
+                        "Skipping g2d/{} {}: alloc failed: {e}",
+                        heap_type, config.name
+                    );
+                    continue;
+                }
+            };
+
+            let g2d = G2D::new("libg2d.so.2").expect("Failed to open G2D");
+
+            let bars: Vec<_> = config
+                .bars
+                .iter()
+                .map(|&(left, top, right, bottom)| {
+                    let mut s = create_surface(&buf, config.dst_w, config.dst_h, DST_FMT_RGBA);
+                    s.left = left;
+                    s.top = top;
+                    s.right = right;
+                    s.bottom = bottom;
+                    s
+                })
+                .collect();
+
+            let g2d_id = format!("g2d/{}", heap_type.name());
+            group.bench_function(BenchmarkId::new(&g2d_id, config.name), |b| {
+                let mut bar_surfaces = bars.clone();
+                b.iter(|| {
+                    for surface in &mut bar_surfaces {
+                        g2d.clear(surface, gray).expect("clear failed");
+                    }
+                    g2d.finish().expect("finish failed");
+                    black_box(&buf);
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_convert,
+    bench_resize,
+    bench_letterbox,
+    bench_partial_clear
+);
 criterion_main!(benches);

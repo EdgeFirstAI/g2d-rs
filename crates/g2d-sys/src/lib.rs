@@ -385,9 +385,8 @@ impl G2D {
 
     /// Clear a surface to a solid color using the hardware `g2d_clear` operation.
     ///
-    /// Works with both `g2d_alloc` and DMA-buf buffers. For DMA-buf buffers on
-    /// cached CMA heaps, ensure proper DRM PRIME attachment is in place so that
-    /// `DMA_BUF_IOCTL_SYNC` performs actual cache maintenance.
+    /// This queues the clear operation. Call [`finish()`](Self::finish) to wait
+    /// for completion, or batch multiple operations before finishing.
     pub fn clear(&self, dst: &mut G2DSurface, color: [u8; 4]) -> Result<()> {
         dst.clrcolor = i32::from_le_bytes(color);
         let ret = if self.version >= G2D_2_3_0 {
@@ -406,15 +405,15 @@ impl G2D {
         if ret != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-
-        if unsafe { self.lib.g2d_finish(self.handle) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
         dst.clrcolor = 0;
 
         Ok(())
     }
 
+    /// Blit (copy/scale/convert) from source to destination surface.
+    ///
+    /// This queues the blit operation. Call [`finish()`](Self::finish) to wait
+    /// for completion, or batch multiple operations before finishing.
     pub fn blit(&self, src: &G2DSurface, dst: &G2DSurface) -> Result<()> {
         let ret = if self.version >= G2D_2_3_0 {
             unsafe {
@@ -441,10 +440,33 @@ impl G2D {
             return Err(std::io::Error::last_os_error().into());
         }
 
+        Ok(())
+    }
+
+    /// Wait for all queued G2D operations to complete.
+    ///
+    /// Must be called after [`clear()`](Self::clear) and/or
+    /// [`blit()`](Self::blit) to ensure the hardware has finished writing.
+    pub fn finish(&self) -> Result<()> {
         if unsafe { self.lib.g2d_finish(self.handle) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
+        Ok(())
+    }
 
+    /// Flush all queued G2D operations for asynchronous execution.
+    ///
+    /// Unlike [`finish()`](Self::finish), this does **not** wait for
+    /// completion — the GPU begins processing immediately but the CPU
+    /// continues. A subsequent `finish()` is still required before the
+    /// CPU reads the destination buffer.
+    ///
+    /// Useful in pipelines where the consumer of the result is not
+    /// immediately ready, allowing GPU work to overlap with other CPU work.
+    pub fn flush(&self) -> Result<()> {
+        if unsafe { self.lib.g2d_flush(self.handle) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
         Ok(())
     }
 

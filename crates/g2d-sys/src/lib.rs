@@ -25,6 +25,8 @@ use std::{
 /// 8 bit grayscale, full range
 // pub const GREY: FourCharCode = four_char_code!("Y800");
 pub const YUYV: FourCharCode = four_char_code!("YUYV");
+/// 8 bit interleaved YUV422 (V-Y-U-Y byte order)
+pub const VYUY: FourCharCode = four_char_code!("VYUY");
 pub const RGBA: FourCharCode = four_char_code!("RGBA");
 pub const RGB: FourCharCode = four_char_code!("RGB ");
 pub const NV12: FourCharCode = four_char_code!("NV12");
@@ -96,6 +98,7 @@ impl TryFrom<FourCharCode> for G2DFormat {
             RGB => Ok(G2DFormat(g2d_format_G2D_RGB888)),
             RGBA => Ok(G2DFormat(g2d_format_G2D_RGBA8888)),
             YUYV => Ok(G2DFormat(g2d_format_G2D_YUYV)),
+            VYUY => Ok(G2DFormat(g2d_format_G2D_VYUY)),
             NV12 => Ok(G2DFormat(g2d_format_G2D_NV12)),
             // GREY => Ok(G2DFormat(g2d_format_G2D_NV12)),
             _ => Err(Error::InvalidFormat(format.to_string())),
@@ -113,6 +116,7 @@ impl TryFrom<G2DFormat> for FourCharCode {
             g2d_format_G2D_RGB888 => Ok(RGB),
             g2d_format_G2D_RGBA8888 => Ok(RGBA),
             g2d_format_G2D_YUYV => Ok(YUYV),
+            g2d_format_G2D_VYUY => Ok(VYUY),
             g2d_format_G2D_NV12 => Ok(NV12),
             _ => Err(Error::InvalidFormat(format!(
                 "Unsupported G2D format: {format:?}"

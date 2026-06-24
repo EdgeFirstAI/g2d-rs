@@ -3,7 +3,7 @@
 # Build Strategy:
 #   - All checks run on ubuntu-22.04-arm (g2d-rs only makes sense on ARM/i.MX)
 #   - Hardware tests on nxp-imx8mp-latest using pre-built binaries
-#   - MSRV: 1.75 (Ubuntu 22.04 default, also in NXP Yocto BSPs)
+#   - MSRV: 1.88 (required by libloading 0.9)
 #
 # Runner Notes:
 #   - ubuntu-22.04-arm: GitHub ARM64 runner (public repos)
@@ -13,7 +13,7 @@
 # - actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 (v4)
 # - actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 (v4)
 # - actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 (v4)
-# - dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb38d33daa680b (1.75)
+# - dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb38d33daa680b (1.88)
 # - Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 (v2.8.2)
 # - taiki-e/install-action@493d7f216ecab2af0602481ce809ab2c72836fa1 (v2.62.62)
 # - SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 (v6.0.0)
@@ -29,7 +29,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  RUST_VERSION: "1.75"
+  RUST_VERSION: "1.88"
 
 jobs:
   # ===========================================================================

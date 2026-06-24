@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-24
+
+### Changed
+
+- Updated all dependencies to their latest releases: `libloading` 0.8 → 0.9,
+  `nix` 0.29 → 0.31, `criterion` 0.5 → 0.8 (dev), `dma-heap` 0.3 → 0.4 (dev),
+  `half` 2.4 → 2.7 (dev, transitive via criterion), plus `log`, `libc`, and
+  `env_logger` to current patch releases.
+- **Breaking:** Raised MSRV from 1.75 to 1.88, required by `libloading` 0.9.
+- **Breaking:** `libloading` 0.9 is a public dependency (exposed via
+  `g2d::from_library`), so consumers must also move to `libloading` 0.9.
+
+### Fixed
+
+- Adapted the dynamic-loading FFI wrapper to `libloading` 0.9's new
+  `AsFilename` bound on `Library::new`; the public `g2d::new<P: AsRef<OsStr>>`
+  signature is unchanged.
+- Replaced the deprecated `criterion::black_box` with `std::hint::black_box`
+  in the video benchmark.
+
 ## [1.2.0] - 2026-02-14
 
 ### Changed

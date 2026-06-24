@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/g2d-sys/badge.svg)](https://docs.rs/g2d-sys)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/EdgeFirstAI/g2d-rs/actions/workflows/test.yml/badge.svg)](https://github.com/EdgeFirstAI/g2d-rs/actions/workflows/test.yml)
-[![MSRV](https://img.shields.io/badge/MSRV-1.75-blue.svg)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html)
+[![MSRV](https://img.shields.io/badge/MSRV-1.88-blue.svg)](https://blog.rust-lang.org/2025/06/26/Rust-1.88.0.html)
 
 **Rust bindings for NXP i.MX G2D 2D graphics accelerator.**
 
@@ -18,7 +18,7 @@ This repository provides Rust bindings to `libg2d.so` for hardware-accelerated 2
 
 ## Requirements
 
-- **Rust 1.75+** (MSRV - Minimum Supported Rust Version)
+- **Rust 1.88+** (MSRV - Minimum Supported Rust Version)
 - NXP i.MX8/i.MX9 platform with G2D support
 - `libg2d.so.2` installed (typically at `/usr/lib/libg2d.so.2`)
 - Linux only (G2D is not available on other platforms)

@@ -12,7 +12,7 @@
 # - actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 (v4)
 # - actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 (v4)
 # - actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 (v4)
-# - dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb38d33daa680b (1.75)
+# - dtolnay/rust-toolchain@6d9817901c499d6b02debbb57edb38d33daa680b (1.88)
 # - Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 (v2.8.2)
 # - benchmark-action/github-action-benchmark@4bdcce38c94cec68da58d012ac24b7b1155efe8b (v1.20.7)
 name: Benchmark
@@ -23,7 +23,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  RUST_VERSION: "1.75"
+  RUST_VERSION: "1.88"
 
 jobs:
   # ===========================================================================

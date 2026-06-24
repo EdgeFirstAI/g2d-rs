@@ -24,8 +24,9 @@ use common::{
     calculate_letterbox, create_source_surface, create_surface, g2d_available, init_source_buffer,
     BenchConfig, DmaBuffer, HeapType, DST_FMT_RGBA, SRC_FMT_NV12, SRC_FMT_RGBA, SRC_FMT_YUYV,
 };
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use g2d_sys::G2D;
+use std::hint::black_box;
 
 // =============================================================================
 // Resolution and format matrices

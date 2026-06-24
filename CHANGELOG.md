@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-06-24
+
+### Fixed
+
+- Corrected the stale MSRV references (1.75 → 1.88) in the `g2d-sys` crate
+  README badge and Requirements section. The 1.3.0 crate metadata already
+  declared `rust-version = 1.88`, but the published README still showed 1.75;
+  crates.io renders the README from the published artifact, so this docs-only
+  patch is needed for the displayed MSRV to match.
+- Updated `crates/g2d-sys/update.sh` to note that `--no-layout-tests` is no
+  longer required by the MSRV (`offset_of!` stable since 1.77) and to document
+  the `libloading` 0.9 `Library::new(path.as_ref())` patch required after
+  regenerating `src/ffi.rs`.
+
 ## [1.3.0] - 2026-06-24
 
 ### Changed

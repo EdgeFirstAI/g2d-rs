@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/g2d-sys.svg)](https://crates.io/crates/g2d-sys)
 [![Documentation](https://docs.rs/g2d-sys/badge.svg)](https://docs.rs/g2d-sys)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](../LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.75-blue.svg)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html)
+[![MSRV](https://img.shields.io/badge/MSRV-1.88-blue.svg)](https://blog.rust-lang.org/2025/06/26/Rust-1.88.0.html)
 
 **Low-level FFI bindings for NXP i.MX G2D 2D graphics accelerator.**
 
@@ -46,7 +46,7 @@ for the complete cache coherency protocol and
 
 ## Requirements
 
-- **Rust 1.75+** (MSRV)
+- **Rust 1.88+** (MSRV)
 - NXP i.MX8/i.MX9 platform
 - `libg2d.so.2` installed
 
